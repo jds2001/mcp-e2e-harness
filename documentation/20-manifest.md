@@ -38,7 +38,8 @@ A map of cell id → cell. Fields:
 | `model` | yes | model id, verbatim in the driver's vocabulary |
 | `knobs` | yes | object of driver-native settings, verbatim (`thinking`, `reasoning_effort`, …); never translated, never defaulted by the harness |
 | `role` | yes | short matrix role (`floor`, `ceiling`, `capability-floor`, `isolation`, `cross-vendor-*`, or suite-defined) |
-| `context` | yes | context condition, one of `fresh` or `crowded`, plus free text; `crowded` means the prompt lands mid-task with other tools registered, per the driver's documented crowding procedure |
+| `context` | yes | `fresh` or `crowded`; `crowded` means the prompt lands mid-way through a harness-owned crowding procedure with other tools registered (ruling S6) |
+| `crowding` | when `context` is `crowded` | `{procedure, collision_review}`: `procedure` names a harness-provided crowding procedure (versioned name, e.g. `neutral-file-triage@1`); `collision_review` is the suite's dated attestation that the procedure's content is disjoint from the server's domain. Suites never supply crowding content; the harness records the procedure's content hash in meta |
 | `tool_surface` | yes | `"full"` or an explicit list of tool names the driver exposes to the consumer; attribution-dependent scoring is valid only for list-valued surfaces (`10-harness.md`) |
 | `merge_gating` | yes | boolean; whether a failure blocks the suite owner's merge |
 | `groups` | yes | which prompt groups run in this cell |
