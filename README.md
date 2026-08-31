@@ -15,6 +15,16 @@ uv run mcp-e2e run --manifest path/to/manifest.json [--cells floor,ceiling] [--g
 
 Secrets never appear in a manifest or an artifact: the manifest references them as `{"$secret": "VAR"}` and the harness resolves them from its own environment at launch. Export them in the shell that runs the harness.
 
+## Smoke suite — proving the instrument
+
+[examples/smoke/prompts.json](examples/smoke/prompts.json) is a checked-in suite whose SUT is the harness's own distractor MCP server, so it needs no network, credentials, or external server. It exists to prove the instrument live — the claude-code driver's isolation flags, the trace proxy's pinned record fields, list-valued surface enforcement, the crowded-cell session mechanics, and the Layer-1 check outcomes — never to measure anything:
+
+```bash
+uv run mcp-e2e run --manifest examples/smoke/prompts.json    # spends a few small model calls
+```
+
+Expected shape of a healthy run: every invocation records at least one trace record (`content-is-typed` and `unfiled-listing-shape` pass, `expected-vacuous` reports vacuous), the isolation cell's `available-tools.json` shows three advertised / one exposed, and the crowded cell's directory carries `crowding.json`, a separate `crowding-trace.jsonl`, and the procedure's content hash in `meta.json`. The artifacts stay under the gitignored `runs/` as the local proof of the driver.
+
 ## What a run records
 
 Run bytes land in a gitignored `runs/<timestamp>/` tree (disposable; the scored findings are what gets committed, in the suite repo). Per invocation, under `<cell>/<group>/<prompt-id>/`:
@@ -29,7 +39,7 @@ Built-in and not waivable: secret hygiene (no configured secret material in any 
 
 ## Crowded cells
 
-`context: "crowded"` cells select a harness-owned, versioned crowding procedure by name (e.g. `neutral-file-triage@1`): the harness registers a distractor MCP server beside the server under test and runs the procedure's opening turn in the same session before the scored prompt lands, recording the procedure's name, version, and content hash. Suites never author crowding content (ruling S6); they attest domain disjointness in `crowding.collision_review`.
+`context: "crowded"` cells select a harness-owned, versioned crowding procedure by name (e.g. `neutral-file-triage@2`): the harness registers a distractor MCP server beside the server under test and runs the procedure's opening turn in the same session before the scored prompt lands, recording the procedure's name, version, and content hash. Suites never author crowding content (ruling S6); they attest domain disjointness in `crowding.collision_review`.
 
 ## Repo layout
 
