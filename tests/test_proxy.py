@@ -20,7 +20,7 @@ def proxy_client(tmp_path, allow_tools: str | None = None,
     server_config = tmp_path / "server-config.json"
     server_config.write_text(json.dumps({
         "command": sys.executable,
-        "args": ["-m", "mcp_e2e_harness.distractor", "--procedure", "neutral-file-triage@1"],
+        "args": ["-m", "mcp_e2e_harness.distractor", "--procedure", "neutral-file-triage@2"],
         "env": server_env or {},
     }))
     args = ["-m", "mcp_e2e_harness.proxy",
@@ -103,6 +103,26 @@ def test_proxy_meta_reports_server_exit(tmp_path):
     assert meta["server_exit"] == 0
     assert meta["malformed_driver_lines"] == 0
     assert meta["unanswered_calls"] == []
+    assert meta["shutdown"] == "clean"
+
+
+def test_proxy_meta_survives_sigterm(tmp_path):
+    # Measured on the first live run: claude ends its MCP children with SIGTERM, never
+    # a clean stdin EOF, and the meta artifact silently did not exist. The meta must
+    # be on disk from startup and be rewritten by the signal handler.
+    client = proxy_client(tmp_path, allow_tools="read_note")
+    client.start()
+    try:
+        blocked = client.call_tool("list_unfiled_notes", {})
+        assert blocked["is_error"] is True
+        proxy_proc = client._proc
+        proxy_proc.terminate()
+        proxy_proc.wait(timeout=10)
+    finally:
+        client.close()
+    meta = json.loads((tmp_path / "proxy-meta.json").read_text())
+    assert meta["shutdown"].startswith("signal-") or meta["shutdown"] == "running"
+    assert [b["tool"] for b in meta["blocked_calls"]] == ["list_unfiled_notes"]
 
 
 def test_secret_placeholder_resolves_from_proxy_environment(tmp_path, monkeypatch):

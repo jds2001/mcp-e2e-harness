@@ -34,6 +34,7 @@ import argparse
 import contextlib
 import json
 import os
+import signal
 import subprocess
 import sys
 import threading
@@ -52,6 +53,7 @@ class _State:
         self.meta_file = meta_file
         self.allow_tools = allow_tools
         self.lock = threading.Lock()
+        self.meta_lock = threading.Lock()
         self.pending_calls: dict[object, dict] = {}   # request id -> {tool, args, started...}
         self.pending_lists: set = set()               # request ids of tools/list
         self.index = 0
@@ -59,14 +61,23 @@ class _State:
         self.malformed_driver_lines = 0
         self.malformed_server_lines = 0
 
-    def write_meta(self, server_exit: int | None) -> None:
-        self.meta_file.write_text(json.dumps({
-            "blocked_calls": self.blocked,
-            "malformed_driver_lines": self.malformed_driver_lines,
-            "malformed_server_lines": self.malformed_server_lines,
-            "unanswered_calls": [p["tool"] for p in self.pending_calls.values()],
-            "server_exit": server_exit,
-        }, indent=2) + "\n")
+    def write_meta(self, server_exit: int | None, shutdown: str) -> None:
+        """Written at startup, on SIGTERM, and at clean exit -- never only at exit.
+
+        Measured (2026-08-31 live run): claude terminates its MCP children with
+        SIGTERM when the turn ends, so an exit-only meta write produced no meta file
+        at all while the incrementally-flushed trace survived. Blocked-call evidence
+        must not depend on a clean shutdown the driver never promises.
+        """
+        with self.meta_lock:
+            self.meta_file.write_text(json.dumps({
+                "blocked_calls": self.blocked,
+                "malformed_driver_lines": self.malformed_driver_lines,
+                "malformed_server_lines": self.malformed_server_lines,
+                "unanswered_calls": [p["tool"] for p in self.pending_calls.values()],
+                "server_exit": server_exit,
+                "shutdown": shutdown,
+            }, indent=2) + "\n")
 
 
 def _now_iso() -> str:
@@ -113,6 +124,9 @@ def _pump_driver_to_server(state: _State, driver_in, server_in, driver_out, out_
                         # record; the attempt is evidence and lands in the proxy meta.
                         forward = False
                         state.blocked.append({"tool": tool, "at": _now_iso()})
+                        # Re-persist immediately: this is the evidence an isolation
+                        # cell's scoring leans on, and the driver may kill us later.
+                        state.write_meta(None, "running")
                         refusal = json.dumps({
                             "jsonrpc": "2.0", "id": msg["id"],
                             "error": {"code": -32602,
@@ -209,6 +223,19 @@ def main(argv: list[str] | None = None) -> int:
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr.fileno(),
         env=env, cwd=config.get("cwd") or None,
     )
+    state.write_meta(None, "running")
+
+    def _on_signal(signum, frame):  # noqa: ARG001
+        # The driver owns this process's lifetime and ends it with SIGTERM, not EOF;
+        # persist what we know, pass the signal on to the server, and go.
+        state.write_meta(None, f"signal-{signum}")
+        with contextlib.suppress(OSError):
+            proc.terminate()
+        os._exit(0)
+
+    signal.signal(signal.SIGTERM, _on_signal)
+    signal.signal(signal.SIGINT, _on_signal)
+
     driver_in = sys.stdin.buffer
     driver_out = sys.stdout.buffer
     out_lock = threading.Lock()
@@ -222,7 +249,7 @@ def main(argv: list[str] | None = None) -> int:
     t_up.join()
     t_down.join()
     exit_code = proc.wait()
-    state.write_meta(exit_code)
+    state.write_meta(exit_code, "clean")
     return exit_code
 
 
