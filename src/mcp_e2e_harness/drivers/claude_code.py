@@ -40,6 +40,10 @@ ATTRIBUTION_CRITICAL = ("WebSearch", "WebFetch", "Bash", "Read")
 class ClaudeCodeDriver(Driver):
     id = "claude-code"
     executable = "claude"
+    disallowed_builtins = DISALLOWED_BUILTINS
+    probe_model = "claude-haiku-4-5-20251001"
+    api_base_env = "ANTHROPIC_BASE_URL"
+    api_default_upstream = "https://api.anthropic.com"
 
     def write_driver_config(self, dest: Path, server_entries: dict[str, dict]) -> Path:
         config = {"mcpServers": server_entries}
@@ -60,8 +64,17 @@ class ClaudeCodeDriver(Driver):
             self.executable, "-p", "--model", ctx.model,
             "--strict-mcp-config",
             "--mcp-config", str(ctx.mcp_config_path),
+            # SURFACE REMOVAL, not just permission denial. Measured (Q2 probe,
+            # 2026-08-31, claude 2.1.221): with only --disallowed-tools, the consumer
+            # still enumerated Read/Edit/Write/Glob/Grep/Bash in its own tool surface
+            # -- disallow denies invocation but leaves the tools visible. --tools ""
+            # empties the built-in set entirely; MCP tools arrive via --mcp-config and
+            # are unaffected (the probe's positive control verifies that every run).
+            "--tools", "",
             "--permission-mode", "acceptEdits",
             "--allowed-tools", self._allowed_tools(ctx),
+            # Belt over the surface removal: even a tool that somehow re-enters the
+            # set (a CLI upgrade, a deferred loader) is denied at invocation.
             "--disallowed-tools", ",".join(DISALLOWED_BUILTINS),
         ]
         mode, session_id = ctx.session
@@ -81,6 +94,12 @@ class ClaudeCodeDriver(Driver):
         if "--strict-mcp-config" not in argv:
             raise missing("--strict-mcp-config")
         try:
+            if argv[argv.index("--tools") + 1] != "":
+                raise missing('--tools "" (an empty built-in set; a non-empty value leaves '
+                              "builtins on the consumer's surface)")
+        except (ValueError, IndexError):
+            raise missing('--tools ""') from None
+        try:
             disallowed = argv[argv.index("--disallowed-tools") + 1].split(",")
             allowed = argv[argv.index("--allowed-tools") + 1]
         except (ValueError, IndexError):
@@ -90,6 +109,7 @@ class ClaudeCodeDriver(Driver):
                 raise missing(f"{tool} in --disallowed-tools")
         return {
             "strict_mcp_config": True,
+            "builtin_tool_set": "(empty via --tools \"\")",
             "allowed_tools": allowed,
             "disallowed_tools": disallowed,
         }

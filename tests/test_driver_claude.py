@@ -24,6 +24,8 @@ def test_argv_closes_the_untraced_channels(tmp_path):
     argv = turn.argv
     assert argv[:2] == ["claude", "-p"]
     assert "--strict-mcp-config" in argv
+    # Surface removal, not just permission denial (Q2 probe finding, 2026-08-31).
+    assert argv[argv.index("--tools") + 1] == ""
     assert argv[argv.index("--allowed-tools") + 1] == "mcp__sut"
     disallowed = argv[argv.index("--disallowed-tools") + 1]
     assert disallowed == ",".join(DISALLOWED_BUILTINS)
@@ -72,6 +74,11 @@ def test_attribution_record_is_asserted_from_argv(tmp_path):
     open_web[i + 1] = "Bash,Read"
     with pytest.raises(DriverAttributionError, match="WebSearch"):
         driver.attribution_record(open_web)
+
+    nonempty_builtins = list(turn.argv)
+    nonempty_builtins[nonempty_builtins.index("--tools") + 1] = "default"
+    with pytest.raises(DriverAttributionError, match="empty built-in set"):
+        driver.attribution_record(nonempty_builtins)
 
 
 def test_write_driver_config(tmp_path):
