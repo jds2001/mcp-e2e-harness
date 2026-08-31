@@ -1,6 +1,8 @@
-# Working in `documentation/fulltext/` — the bill-text spec
+# Working in `documentation/` — the e2e-harness spec
 
 ## Role and scope
+
+Historical examples cited in this file (the pcs2 date, F20/F28/F23, the 96-tool trace) are inherited from the ancestor project this spec was generalized from; the record they refer to is `examples/congressmcp/`.
 
 This directory **is** the spec. Write authority is here and nowhere else in the repo.
 
