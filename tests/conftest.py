@@ -15,6 +15,8 @@ from __future__ import annotations
 import copy
 import json
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import pytest
@@ -31,6 +33,8 @@ from mcp_e2e_harness.drivers.base import Driver, TurnContext, TurnSpec  # noqa: 
 class FakeDriver(Driver):
     id = "fake"
     executable = sys.executable
+    disallowed_builtins = ("FakeWeb",)
+    probe_model = "fake-model-1"
 
     def write_driver_config(self, dest: Path, server_entries: dict[str, dict]) -> Path:
         path = dest / "mcp-config.json"
@@ -98,3 +102,32 @@ def write_manifest(tmp_path: Path, data: dict) -> Path:
 @pytest.fixture()
 def fake_drivers() -> dict[str, Driver]:
     return {"fake": FakeDriver()}
+
+
+@pytest.fixture()
+def fake_api_upstream():
+    """A stand-in model API for capture tests: accepts anything, returns {"ok": true}."""
+
+    class Handler(BaseHTTPRequestHandler):
+        def log_message(self, *args):  # noqa: ARG002
+            pass
+
+        def _reply(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            if length:
+                self.rfile.read(length)
+            payload = b'{"ok": true, "from": "fake-upstream"}'
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        do_GET = do_POST = do_PUT = _reply
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield f"http://127.0.0.1:{server.server_address[1]}"
+    server.shutdown()
+    server.server_close()

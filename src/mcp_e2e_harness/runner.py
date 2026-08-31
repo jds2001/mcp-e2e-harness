@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -34,6 +35,7 @@ from pathlib import Path
 
 from . import __version__, crowding
 from . import checks as checks_mod
+from .api_capture import ApiSurfaceRecorder, summarize
 from .drivers import DRIVERS, Driver
 from .drivers.base import TurnContext
 from .manifest import Manifest
@@ -77,6 +79,7 @@ class RunResult:
     failures: int
     zero_trace_cells: list[str]
     checks_report: list[dict]
+    driver_probes: dict[str, dict] = field(default_factory=dict)
 
 
 def plan_invocations(manifest: Manifest, cells: list[str],
@@ -237,13 +240,14 @@ def _write_scanned(path: Path, text: str, scan: list[str]) -> None:
 
 def _crowding_preturn(driver: Driver, ctx_base: dict, procedure: crowding.CrowdingProcedure,
                       dest: Path, cwd: Path, timeout_s: int, scan: list[str],
-                      session_id: str, crowd_config: Path) -> dict:
+                      session_id: str, crowd_config: Path,
+                      env: dict[str, str] | None = None) -> dict:
     """Run the crowding procedure's opening turn so the scored prompt lands mid-task."""
     ctx = TurnContext(**ctx_base, mcp_config_path=crowd_config,
                       session=("open", session_id), prompt=procedure.opening_prompt)
     turn = driver.build_turn(ctx)
     driver.attribution_record(turn.argv)
-    proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text,
+    proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text, env=env,
                           capture_output=True, text=True, timeout=timeout_s)
     record = {
         "procedure": procedure.name,
@@ -318,6 +322,19 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     attribution = driver.attribution_record(turn.argv)
     assert_clean("\n".join(turn.argv), scan, "runner argv")
 
+    # API-boundary tool-surface capture (Q2's preferred instrument): the driver's
+    # outbound API traffic is routed through a local recording proxy for the whole
+    # invocation (pre-turn included), so the tools array actually sent to the model is
+    # an observation off the wire, recorded during the scored turn with zero
+    # disclosure -- never a model claim.
+    recorder = None
+    turn_env: dict[str, str] | None = None
+    if driver.api_base_env and not config.dry_run:
+        upstream = os.environ.get(driver.api_base_env) or driver.api_default_upstream
+        recorder = ApiSurfaceRecorder(dest / "api-surface.jsonl", upstream)
+        turn_env = dict(os.environ)
+        turn_env[driver.api_base_env] = recorder.start()
+
     if config.dry_run:
         exit_status, answer = 0, "[dry-run: no model was called]"
     else:
@@ -327,8 +344,8 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
             if crowded and procedure is not None:
                 crowding_record = _crowding_preturn(
                     driver, ctx_base, procedure, dest, cwd, config.timeout_s, scan,
-                    session_id, dest / "mcp-config-crowding.json")
-            proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text,
+                    session_id, dest / "mcp-config-crowding.json", env=turn_env)
+            proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text, env=turn_env,
                                   capture_output=True, text=True, timeout=config.timeout_s)
             exit_status = proc.returncode
             stderr_text = proc.stderr
@@ -352,8 +369,33 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
             harness_failure = f"runner not found: {exc}"
         except (HarnessError, MCPClientError) as exc:
             harness_failure = str(exc)
+        finally:
+            if recorder is not None:
+                recorder.stop()
         _write_scanned(dest / "runner-stderr.txt", stderr_text, scan)
         _write_scanned(dest / "answer.txt", answer, scan)
+
+    api_surface: dict | None = None
+    if recorder is not None:
+        api_surface = summarize(dest / "api-surface.jsonl", driver.disallowed_builtins) or {
+            "requests_with_tools": 0, "tool_names_union": [], "disallowed_builtins_on_wire": []}
+        api_surface["upstream_forward_errors"] = recorder.forward_errors
+        if harness_failure is None:
+            if api_surface["disallowed_builtins_on_wire"]:
+                # The channel the argv claims closed is open at the wire: an instrument
+                # breach, not a consumer behavior; the row's claims are not
+                # attribution-scoreable (the ancestor's F30 shape).
+                harness_failure = (
+                    "disallowed builtin(s) "
+                    f"{api_surface['disallowed_builtins_on_wire']} observed in the tools array "
+                    "sent to the model -- instrument breach; claims not tool-attributable")
+            elif api_surface["requests_with_tools"] == 0:
+                # An answer with zero captured model requests means the driver did not
+                # route through the capture; unverified must never read as verified.
+                harness_failure = (
+                    "API surface capture recorded zero model requests carrying a tools "
+                    "array: the driver did not route through the capture proxy, so "
+                    "builtin absence is unverified for this invocation")
 
     duration = round(time.perf_counter() - t0, 2)
     records, parse_errors = _read_trace(dest / "trace.jsonl")
@@ -396,6 +438,9 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "command": turn.argv,
         "cwd": str(cwd),
         "recorded_tool_surface": recorded_surface,
+        # Wire-level observation of the tools array sent to the model (Q2's preferred
+        # instrument); null when the driver does not support capture or on a dry run.
+        "api_surface": api_surface,
         "attribution": attribution,
         "setup": setup_records,
         "crowding": ({"procedure": procedure.name, "version": procedure.version,
@@ -437,6 +482,153 @@ def write_cell_void(run_dir: Path, cell_name: str, reason: str) -> None:
         "reason": reason,
         "scoring_rule": "Do not score any row of this cell as a consumer result.",
     }, indent=2) + "\n")
+
+
+# -------------------------- builtin-surface calibration probe (Q2 fallback instrument)
+
+# Instrument ranking (Q2 ruling, 455568a): the API-boundary capture is preferred (wire
+# ground truth, zero disclosure, runs on scored cells); THIS probe is the fallback for
+# drivers whose API traffic the harness cannot interpose. It is a CALIBRATION run -- a
+# separate, discarded invocation under the identical configuration; the scored
+# consumer never sees it -- so it breaches no-disclosure only if misused inside a
+# scored turn, which the harness never does. Its two stated caveats: it relies on the
+# driver constructing the surface deterministically from configuration (so it is valid
+# per recorded cli_version and must be re-run when that changes), and the enumeration
+# is model-mediated (it can omit, paraphrase, or hallucinate). The probe measures the
+# INSTRUMENT, never a consumer: like the ancestor's canary it may name what it needs.
+PROBE_PROMPT = (
+    "This is an instrument check, not a task. Reply with the exact names of every tool "
+    "available to you in this session, one name per line and nothing else. Include every "
+    "MCP tool and every built-in tool you are able to call."
+)
+PROBE_SERVER_NAME = "probe_target"
+# A tool name the enumeration must contain for the probe to count as an enumeration at
+# all: the harness's own distractor server is registered as the MCP target, so its
+# tools are known-present. Without this positive control, a refusal, an error, or an
+# empty answer would read as "no builtins" -- a scan that errors must never look like
+# one that found nothing.
+PROBE_POSITIVE_CONTROL = "list_unfiled_notes"
+
+PROBE_PASS = "builtins-reported-absent"
+
+_PROBE_CAVEAT = (
+    "Calibration evidence, model-mediated: the verdict is over the consumer's own "
+    "enumeration of its tool surface in a discarded invocation under the identical "
+    "configuration -- absence of mention is not proof of absence, and validity rests "
+    "on the driver building the surface deterministically from configuration, so this "
+    "measurement is per cli_version and must be re-run when that changes. It pairs "
+    "with the argv-asserted attribution record. Where the driver supports it, the "
+    "API-boundary capture (api-surface.jsonl per invocation) supersedes this probe "
+    "with wire-level ground truth (Q2 ruling, documentation/90-open-questions.md). "
+    f"A verdict other than '{PROBE_PASS}' refuses merge-gating cells as "
+    "instrument-broken."
+)
+
+
+def probe_builtin_surface(driver: Driver, dest: Path, *, model: str | None = None,
+                          timeout_s: int = DEFAULT_TIMEOUT_S, tmp_base: Path | None = None,
+                          scan: list[str] | None = None) -> dict:
+    """Measure whether the driver's disallowed builtins reach the consumer's surface.
+
+    Runs one turn under the exact isolation argv the cells use, against the harness's
+    own distractor server, asking the consumer to enumerate its tools. Verdicts:
+
+    * ``builtins-reported-absent`` -- enumeration happened (positive control present)
+      and no disallowed builtin name appears in it.
+    * ``builtins-present`` -- a disallowed builtin appears: the channel the argv
+      claims to close is open. Instrument defect.
+    * ``broken`` -- the probe could not measure (runner failure, or no enumeration);
+      never read as builtins-absent.
+    """
+    model = model or driver.probe_model
+    if not model:
+        raise HarnessError(
+            f"driver {driver.id!r} defines no probe model; pass one explicitly. An unprobeable "
+            "driver may not host merge-gating cells.")
+    if not driver.disallowed_builtins:
+        raise HarnessError(
+            f"driver {driver.id!r} declares no disallowed builtins to probe for -- the probe "
+            "would be a zero-denominator claim.")
+    scan = scan or []
+    dest = dest.resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    cwd = make_neutral_cwd("probe", tmp_base)
+    server_config = dest / "server-config.json"
+    server_config.write_text(json.dumps({
+        "command": sys.executable,
+        "args": ["-m", "mcp_e2e_harness.distractor",
+                 "--procedure", crowding.NEUTRAL_FILE_TRIAGE_V2.full_name],
+        "env": {},
+    }, indent=2) + "\n")
+    entries = {PROBE_SERVER_NAME: _proxy_entry(server_config, dest, "", {"tool_surface": "full"})}
+    config_path = driver.write_driver_config(dest, entries)
+
+    ctx = TurnContext(model=model, knobs={}, mcp_config_path=config_path,
+                      server_name=PROBE_SERVER_NAME, tool_surface="full",
+                      prompt=PROBE_PROMPT, dest=dest)
+    turn = driver.build_turn(ctx)
+    attribution = driver.attribution_record(turn.argv)
+
+    started = _utcnow()
+    answer = ""
+    stderr_text = ""
+    exit_status = -1
+    detail: str | None = None
+    try:
+        proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text,
+                              capture_output=True, text=True, timeout=timeout_s)
+        exit_status = proc.returncode
+        stderr_text = proc.stderr
+        if turn.answer_from == "stdout":
+            answer = proc.stdout
+        elif turn.answer_path and turn.answer_path.exists():
+            answer = turn.answer_path.read_text()
+    except subprocess.TimeoutExpired:
+        detail = f"probe timed out after {timeout_s}s"
+    except FileNotFoundError as exc:
+        detail = f"driver executable not found: {exc}"
+    _write_scanned(dest / "answer.txt", answer, scan)
+    _write_scanned(dest / "runner-stderr.txt", stderr_text, scan)
+
+    found: list[str] = []
+    if detail is not None:
+        verdict = "broken"
+    elif exit_status != 0:
+        verdict, detail = "broken", f"probe runner exited {exit_status}: {stderr_text[-400:]}"
+    elif PROBE_POSITIVE_CONTROL not in answer:
+        verdict = "broken"
+        detail = (f"positive control {PROBE_POSITIVE_CONTROL!r} absent from the answer: the "
+                  "enumeration did not happen (refusal, empty answer, or MCP surface missing). "
+                  "An un-run enumeration must never read as builtins-absent.")
+    else:
+        # Case-sensitive whole-token match, so 'read_note' never trips 'Read'. A false
+        # positive fails loudly and gets investigated -- the safe direction.
+        found = [name for name in driver.disallowed_builtins
+                 if re.search(rf"(?<![A-Za-z0-9_]){re.escape(name)}(?![A-Za-z0-9_])", answer)]
+        verdict = "builtins-present" if found else PROBE_PASS
+        if found:
+            detail = f"disallowed builtin(s) {found} appear in the consumer's own tool enumeration"
+
+    record = {
+        "driver": {"id": driver.id, "cli_version": driver.cli_version()},
+        "model": model,
+        "prompt": PROBE_PROMPT,
+        "command": turn.argv,
+        "attribution": attribution,
+        "started_utc": started,
+        "finished_utc": _utcnow(),
+        "exit_status": exit_status,
+        "answer_chars": len(answer),
+        "positive_control": {"expected": PROBE_POSITIVE_CONTROL,
+                             "found": PROBE_POSITIVE_CONTROL in answer},
+        "builtins_checked": list(driver.disallowed_builtins),
+        "builtins_found": found,
+        "verdict": verdict,
+        "detail": detail,
+        "caveat": _PROBE_CAVEAT,
+    }
+    _write_scanned(dest / "probe.json", json.dumps(record, indent=2) + "\n", scan)
+    return record
 
 
 def preflight(config: RunConfig) -> None:
@@ -498,6 +690,32 @@ def run(config: RunConfig) -> RunResult:
     driver_versions = ({d: None for d in driver_ids} if config.dry_run else
                        {d: config.drivers[d].cli_version() for d in sorted(driver_ids)})
 
+    # Q2 gate for drivers WITHOUT API-boundary capture: before any prompt is spent,
+    # such a driver hosting a merge-gating cell runs the calibration probe (a
+    # discarded invocation under the identical configuration). A non-passing probe
+    # refuses the run as instrument-broken rather than producing gating results that
+    # cannot be attribution-scored (documentation/10-harness.md; the probe artifacts
+    # stay in the run dir as evidence either way). Capture-capable drivers skip the
+    # probe: their surface is observed off the wire on every invocation, which
+    # supersedes the calibration form (Q2 ruling, 455568a).
+    scan = collect_scan_set(manifest.data)
+    driver_probes: dict[str, dict] = {}
+    if not config.dry_run:
+        gating_drivers = sorted({manifest.cells[c]["driver"] for c in config.cells
+                                 if manifest.cells[c]["merge_gating"]
+                                 and not config.drivers[manifest.cells[c]["driver"]].api_base_env})
+        for driver_id in gating_drivers:
+            record = probe_builtin_surface(
+                config.drivers[driver_id], config.run_dir / "driver-probe" / driver_id,
+                timeout_s=config.timeout_s, tmp_base=config.tmp_base, scan=scan)
+            driver_probes[driver_id] = record
+            if record["verdict"] != PROBE_PASS:
+                raise HarnessError(
+                    f"builtin-surface probe for driver {driver_id!r} returned "
+                    f"{record['verdict']!r}: {record['detail']}. Merge-gating cells are refused "
+                    f"as instrument-broken; evidence in "
+                    f"{config.run_dir / 'driver-probe' / driver_id / 'probe.json'}.")
+
     results: list[dict] = []
     failures = 0
     for item in planned:
@@ -540,6 +758,10 @@ def run(config: RunConfig) -> RunResult:
                       "groups": sorted(config.groups) if config.groups else None,
                       "prompts": sorted(config.prompts) if config.prompts else None},
         "driver_versions": driver_versions,
+        "driver_probes": {d: {"verdict": r["verdict"],
+                              "builtins_found": r["builtins_found"],
+                              "path": f"driver-probe/{d}/probe.json"}
+                          for d, r in driver_probes.items()},
         "cells": {c: manifest.cells[c] for c in config.cells},
         "fixtures": manifest.fixtures,
         "dry_run": config.dry_run,
@@ -548,8 +770,8 @@ def run(config: RunConfig) -> RunResult:
         "failures": failures,
         "results": results,
     }
-    scan = collect_scan_set(manifest.data)
     _write_scanned(config.run_dir / "run-manifest.json",
                    json.dumps(run_manifest, indent=2) + "\n", scan)
     return RunResult(run_dir=config.run_dir, results=results, failures=failures,
-                     zero_trace_cells=dead, checks_report=checks_report)
+                     zero_trace_cells=dead, checks_report=checks_report,
+                     driver_probes=driver_probes)

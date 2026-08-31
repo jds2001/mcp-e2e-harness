@@ -48,6 +48,22 @@ class TurnContext:
 class Driver(ABC):
     id: str
     executable: str
+    # Builtin tool names this driver's argv disallows; the builtin-surface probe (Q2)
+    # checks the consumer's self-reported surface against exactly these names.
+    disallowed_builtins: tuple[str, ...] = ()
+    # Default model for the builtin-surface probe when none is given, in the driver's
+    # own vocabulary. Empty means the driver cannot be probed, and therefore may not
+    # host merge-gating cells (the probe gates them).
+    probe_model: str = ""
+    # Env var that redirects this driver's outbound API traffic (e.g.
+    # ANTHROPIC_BASE_URL). Non-empty enables the API-boundary tool-surface capture --
+    # Q2's preferred instrument, wire-level ground truth recorded on every scored
+    # invocation. Empty means capture is unsupported and merge-gating cells fall back
+    # to the calibration probe.
+    api_base_env: str = ""
+    # Where that traffic goes when the harness's own environment does not already
+    # override api_base_env.
+    api_default_upstream: str = ""
 
     def cli_version(self) -> str:
         """The driver CLI's version string, recorded at run time -- never assumed.

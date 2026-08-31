@@ -37,6 +37,20 @@ Plus `run-manifest.json` and `checks-report.json` at the run root. Layer-1 check
 
 Built-in and not waivable: secret hygiene (no configured secret material in any artifact — the run halts) and instrument liveness (a cell whose every invocation recorded zero trace records is reported BROKEN, never clean).
 
+## Verifying the builtin-tool surface (Q2)
+
+The MCP proxy records and enforces the *MCP-side* surface, but a driver's built-in tools (web, filesystem, shell) never cross it. Two instruments close that gap, ranked per the spec's Q2 ruling:
+
+**API-boundary capture (preferred — wire-level ground truth).** For drivers whose outbound API traffic the harness can redirect (claude-code, via `ANTHROPIC_BASE_URL`), every invocation routes through a local transparent recording proxy that records the actual `tools` array sent to the model — `api-surface.jsonl` beside the trace, summarized in `meta.json` as `api_surface`. Nothing model-mediated sits in the verification path, and recording an outgoing request changes nothing in the consumer's context, so it runs during scored cells. Only tool *names* are recorded — never headers, message content, or schemas. A disallowed builtin observed on the wire is an instrument breach (the row's claims are not tool-attributable); an invocation whose capture recorded zero model requests is *unverified*, never clean.
+
+**Calibration probe (fallback, for drivers without capture).** A separate, discarded invocation under the identical configuration asks the consumer to enumerate its tools; the enumeration must contain the distractor target's tools (positive control — a refusal is `broken`, never "builtins absent") and none of the disallowed builtin names. Model-mediated and valid per recorded `cli_version`, both stated in the artifact's caveat. `mcp-e2e run` probes such a driver automatically before any prompt is spent whenever a selected cell is `merge_gating`; on demand:
+
+```bash
+uv run mcp-e2e probe-driver --driver claude-code    # one small model call; no manifest needed
+```
+
+The probe already earned its keep once: it caught that claude's `--disallowed-tools` denies invocation but leaves builtins on the consumer's surface, which is why the driver now also passes `--tools ""` (surface removal, with disallow kept as the belt).
+
 ## Crowded cells
 
 `context: "crowded"` cells select a harness-owned, versioned crowding procedure by name (e.g. `neutral-file-triage@2`): the harness registers a distractor MCP server beside the server under test and runs the procedure's opening turn in the same session before the scored prompt lands, recording the procedure's name, version, and content hash. Suites never author crowding content (ruling S6); they attest domain disjointness in `crowding.collision_review`.

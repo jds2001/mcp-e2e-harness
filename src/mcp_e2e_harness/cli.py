@@ -16,8 +16,16 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .checks import lint_check
+from .drivers import DRIVERS
 from .manifest import Manifest, ManifestError, load_manifest
-from .runner import DEFAULT_TIMEOUT_S, HarnessError, RunConfig, run
+from .runner import (
+    DEFAULT_TIMEOUT_S,
+    PROBE_PASS,
+    HarnessError,
+    RunConfig,
+    probe_builtin_surface,
+    run,
+)
 from .secrets import MissingSecretError, SecretLeakError
 
 
@@ -75,6 +83,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     print(f"manifest   : {manifest.sha256[:16]}  ({manifest.path})")
     print(f"run dir    : {result.run_dir}")
+    for driver_id, record in result.driver_probes.items():
+        print(f"probe      : {driver_id} builtin surface -> {record['verdict']}  "
+              f"(driver-probe/{driver_id}/probe.json)")
     print(f"invocations: {len(result.results)}   (one fresh process each -- never batched)")
     for meta in result.results:
         flag = "  [outside cell groups]" if meta["outside_cell_groups"] else ""
@@ -91,6 +102,30 @@ def cmd_run(args: argparse.Namespace) -> int:
     print("This harness does not score. Pass/fail against the pinned criteria in each "
           "meta.json is a human/spec-session judgment.")
     return 1 if result.failures else 0
+
+
+def cmd_probe_driver(args: argparse.Namespace) -> int:
+    driver = DRIVERS.get(args.driver)
+    if driver is None:
+        print(f"FATAL: unknown driver {args.driver!r} (available: {sorted(DRIVERS)})")
+        return 2
+    out = Path(args.out) if args.out else (
+        Path.cwd() / "runs" / f"driver-probe-{args.driver}-"
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}")
+    try:
+        record = probe_builtin_surface(driver, out, model=args.model,
+                                       timeout_s=args.timeout)
+    except HarnessError as exc:
+        print(f"FATAL: {exc}")
+        return 2
+    print(f"driver     : {record['driver']['id']}  [{record['driver']['cli_version']}]")
+    print(f"model      : {record['model']}")
+    print(f"verdict    : {record['verdict']}")
+    if record["detail"]:
+        print(f"detail     : {record['detail']}")
+    print(f"evidence   : {out / 'probe.json'}  (self-report -- absence of mention is not "
+          "proof of absence; pair with the attribution record in the same file)")
+    return 0 if record["verdict"] == PROBE_PASS else 1
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -115,6 +150,20 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S,
                        help=f"per-invocation timeout in seconds (default {DEFAULT_TIMEOUT_S})")
     p_run.set_defaults(func=cmd_run)
+
+    p_probe = sub.add_parser(
+        "probe-driver",
+        help="measure whether a driver's disallowed builtins reach the consumer's own tool "
+             "surface (the Q2 evidence; runs one small model turn against the harness's "
+             "distractor server, no manifest needed)")
+    p_probe.add_argument("--driver", required=True)
+    p_probe.add_argument("--model", default=None,
+                         help="model for the probe turn, in the driver's vocabulary "
+                              "(default: the driver's probe_model)")
+    p_probe.add_argument("--out", default=None,
+                         help="artifact directory (default runs/driver-probe-<driver>-<utc>)")
+    p_probe.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
+    p_probe.set_defaults(func=cmd_probe_driver)
 
     args = parser.parse_args(argv)
     return args.func(args)

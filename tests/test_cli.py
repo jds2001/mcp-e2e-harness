@@ -55,6 +55,11 @@ def test_run_dry_run_via_cli(tmp_path, capsys):
     assert "--strict-mcp-config" in run_manifest["results"][0]["command"]
 
 
+def test_probe_driver_unknown_driver_exits_2(capsys):
+    assert main(["probe-driver", "--driver", "mystery-cli"]) == 2
+    assert "unknown driver" in capsys.readouterr().out
+
+
 def test_run_fatal_config_error_exits_2(tmp_path, capsys):
     data = claude_cell_data()
     path = write_manifest(tmp_path, data)

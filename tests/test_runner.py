@@ -18,6 +18,7 @@ from mcp_e2e_harness.runner import (
     RunConfig,
     make_neutral_cwd,
     plan_invocations,
+    probe_builtin_surface,
     resolve_prompt,
     run,
 )
@@ -171,6 +172,121 @@ def test_relative_run_dir_still_yields_absolute_config_paths(tmp_path, fake_driv
     config_path = Path(result.results[0]["command"][2])  # FakeDriver argv: [py, consumer, config]
     assert config_path.is_absolute()
     assert config_path.exists()
+
+
+# ------------------------------------------ API-boundary surface capture (Q2, wire)
+
+def capture_drivers() -> dict:
+    from conftest import FakeDriver
+
+    class CapturingFakeDriver(FakeDriver):
+        api_base_env = "FAKE_API_BASE"
+
+    return {"fake": CapturingFakeDriver()}
+
+
+def test_capture_observes_the_wire_surface_on_a_scored_invocation(
+        tmp_path, fake_api_upstream, monkeypatch):
+    monkeypatch.setenv("FAKE_API_BASE", fake_api_upstream)
+    config = config_for(tmp_path, manifest_data(), capture_drivers())
+    result = run(config)
+    assert result.failures == 0
+    surface = result.results[0]["api_surface"]
+    assert surface["requests_with_tools"] == 1
+    assert "mcp__notes_sut__list_unfiled_notes" in surface["tool_names_union"]
+    assert surface["disallowed_builtins_on_wire"] == []
+    dest = config.run_dir / "basic" / "A" / "A1"
+    record = json.loads((dest / "api-surface.jsonl").read_text().splitlines()[0])
+    assert record["model"] == "fake-model-1"
+    # A capture-capable gating driver is verified on the wire, not by the
+    # calibration probe.
+    assert result.driver_probes == {}
+    assert not (config.run_dir / "driver-probe").exists()
+
+
+def test_disallowed_builtin_on_the_wire_is_an_instrument_breach(
+        tmp_path, fake_api_upstream, monkeypatch):
+    monkeypatch.setenv("FAKE_API_BASE", fake_api_upstream)
+    monkeypatch.setenv("FAKE_WIRE_BUILTIN", "1")
+    config = config_for(tmp_path, manifest_data(), capture_drivers())
+    result = run(config)
+    assert result.failures >= 1
+    meta = result.results[0]
+    assert meta["api_surface"]["disallowed_builtins_on_wire"] == ["FakeWeb"]
+    assert "not tool-attributable" in meta["harness_failure"]
+
+
+def test_unrouted_capture_reads_as_unverified_never_as_clean(
+        tmp_path, fake_api_upstream, monkeypatch):
+    monkeypatch.setenv("FAKE_API_BASE", fake_api_upstream)
+    monkeypatch.setenv("FAKE_IGNORE_API_BASE", "1")
+    config = config_for(tmp_path, manifest_data(), capture_drivers())
+    result = run(config)
+    assert result.failures >= 1
+    meta = result.results[0]
+    assert meta["api_surface"]["requests_with_tools"] == 0
+    assert "unverified" in meta["harness_failure"]
+
+
+# ------------------------------- builtin-surface calibration probe (Q2 fallback gate)
+
+def test_gating_run_probes_the_driver_before_spending_prompts(tmp_path, fake_drivers):
+    config = config_for(tmp_path, manifest_data(), fake_drivers)  # basic is merge_gating
+    result = run(config)
+    assert result.failures == 0
+    probe = json.loads((config.run_dir / "driver-probe" / "fake" / "probe.json").read_text())
+    assert probe["verdict"] == "builtins-reported-absent"
+    assert probe["positive_control"]["found"] is True
+    assert probe["builtins_checked"] == ["FakeWeb"]
+    assert probe["builtins_found"] == []
+    assert result.driver_probes["fake"]["verdict"] == "builtins-reported-absent"
+    run_manifest = json.loads((config.run_dir / "run-manifest.json").read_text())
+    assert run_manifest["driver_probes"]["fake"]["path"] == "driver-probe/fake/probe.json"
+
+
+def test_probe_halts_gating_run_when_a_builtin_is_reported(tmp_path, fake_drivers, monkeypatch):
+    monkeypatch.setenv("FAKE_BUILTIN_PRESENT", "1")
+    config = config_for(tmp_path, manifest_data(), fake_drivers)
+    with pytest.raises(HarnessError, match="FakeWeb"):
+        run(config)
+    probe = json.loads((config.run_dir / "driver-probe" / "fake" / "probe.json").read_text())
+    assert probe["verdict"] == "builtins-present"
+    assert probe["builtins_found"] == ["FakeWeb"]
+    # No prompt was spent: the probe gate fired before any cell invocation.
+    assert not (config.run_dir / "basic").exists()
+
+
+def test_failed_enumeration_is_broken_never_builtins_absent(tmp_path, fake_drivers, monkeypatch):
+    monkeypatch.setenv("FAKE_PROBE_SILENT", "1")
+    config = config_for(tmp_path, manifest_data(), fake_drivers)
+    with pytest.raises(HarnessError, match="positive control"):
+        run(config)
+    probe = json.loads((config.run_dir / "driver-probe" / "fake" / "probe.json").read_text())
+    assert probe["verdict"] == "broken"
+
+
+def test_non_gating_run_skips_the_probe(tmp_path, fake_drivers):
+    data = manifest_data()
+    data["cells"]["basic"]["merge_gating"] = False
+    config = config_for(tmp_path, data, fake_drivers)
+    result = run(config)
+    assert result.driver_probes == {}
+    assert not (config.run_dir / "driver-probe").exists()
+
+
+def test_probe_token_matching_is_whole_word_and_case_sensitive(tmp_path, fake_drivers):
+    # The distractor's own tool names contain 'read'/'list'; they must never trip a
+    # builtin named 'Read'. Probe a driver whose disallowed list collides in
+    # lowercase-substring space only.
+    driver = fake_drivers["fake"]
+
+    class CollidingDriver(type(driver)):
+        id = "fake"
+        disallowed_builtins = ("Read", "List", "Note")
+
+    record = probe_builtin_surface(CollidingDriver(), tmp_path / "probe")
+    assert record["verdict"] == "builtins-reported-absent"
+    assert record["builtins_found"] == []
 
 
 def checks_for_tests() -> list[dict]:

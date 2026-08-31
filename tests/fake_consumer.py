@@ -27,6 +27,36 @@ def main() -> int:
     config = json.loads(Path(sys.argv[1]).read_text())
     prompt = sys.stdin.read()
 
+    # A real driver sends its requests to the model API; when the harness redirects
+    # that traffic (FAKE_API_BASE, the capture proxy), emit one request whose body
+    # carries a tools array, like the real thing would.
+    base = os.environ.get("FAKE_API_BASE")
+    if base and not os.environ.get("FAKE_IGNORE_API_BASE"):
+        import urllib.request
+        tools = [{"name": "mcp__notes_sut__list_unfiled_notes"}]
+        if os.environ.get("FAKE_WIRE_BUILTIN"):
+            tools.append({"name": "FakeWeb"})
+        body = json.dumps({"model": "fake-model-1", "tools": tools, "messages": []}).encode()
+        request = urllib.request.Request(base + "/v1/messages", data=body,
+                                         headers={"Content-Type": "application/json"},
+                                         method="POST")
+        urllib.request.urlopen(request, timeout=30).read()
+
+    if "instrument check" in prompt:
+        # The builtin-surface probe: enumerate tools, one name per line.
+        if os.environ.get("FAKE_PROBE_SILENT"):
+            print("I cannot enumerate my tools right now.")
+            return 0
+        name, entry = next(iter(config["mcpServers"].items()))
+        env = dict(os.environ)
+        env.update(entry.get("env") or {})
+        with StdioMCPClient(entry["command"], entry.get("args") or [], env=env) as client:
+            for tool in client.list_tools():
+                print(f"mcp__{name}__{tool['name']}")
+        if os.environ.get("FAKE_BUILTIN_PRESENT"):
+            print("FakeWeb")
+        return 0
+
     if "do not call any tools" in prompt:
         print("I answered from memory without calling any tools.")
         return 0
