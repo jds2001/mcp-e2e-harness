@@ -1,0 +1,9 @@
+# Run bytes are disposable; the scored findings are what gets committed, in the suite repo.
+runs/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+uv.lock

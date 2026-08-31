@@ -1,0 +1,124 @@
+"""CLI for the harness.
+
+    mcp-e2e validate --manifest suite/manifest.json
+    mcp-e2e run --manifest suite/manifest.json [--run-dir runs/X] [--cells a,b]
+                [--groups A,B] [--prompts A1,B2] [--dry-run] [--timeout 900]
+
+The harness executes and records; it never scores. Pass/fail against the pinned
+criteria in each meta.json is a human/spec-session judgment, recorded beside -- never
+instead of -- the raw artifacts.
+"""
+from __future__ import annotations
+
+import argparse
+import sys
+from datetime import datetime, timezone
+from pathlib import Path
+
+from .checks import lint_check
+from .manifest import Manifest, ManifestError, load_manifest
+from .runner import DEFAULT_TIMEOUT_S, HarnessError, RunConfig, run
+from .secrets import MissingSecretError, SecretLeakError
+
+
+def _load(path: str) -> Manifest:
+    try:
+        return load_manifest(Path(path))
+    except (OSError, ManifestError) as exc:
+        raise SystemExit(f"FATAL: {exc}") from None
+
+
+def cmd_validate(args: argparse.Namespace) -> int:
+    manifest = _load(args.manifest)
+    problems = []
+    for i, check in enumerate(manifest.checks):
+        message = lint_check(check)
+        if message:
+            cid = check.get("id") if isinstance(check, dict) else None
+            problems.append(f"  checks[{i}] ({cid or 'no id'}): {message}")
+    print(f"manifest   : {manifest.path}")
+    print(f"sha256     : {manifest.sha256}")
+    print(f"cells      : {', '.join(manifest.cells)}")
+    print(f"prompts    : {len(manifest.prompts)}")
+    print(f"checks     : {len(manifest.checks)}" + ("" if not problems else "  (with problems)"))
+    if problems:
+        print("check problems (each would evaluate to the 'error' outcome at run time):")
+        print("\n".join(problems))
+        return 1
+    print("manifest loads clean.")
+    return 0
+
+
+def cmd_run(args: argparse.Namespace) -> int:
+    manifest = _load(args.manifest)
+    cells = ([c.strip() for c in args.cells.split(",") if c.strip()]
+             if args.cells else list(manifest.cells))
+    run_dir = Path(args.run_dir) if args.run_dir else (
+        Path.cwd() / "runs" / datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ"))
+    config = RunConfig(
+        manifest=manifest,
+        run_dir=run_dir,
+        cells=cells,
+        groups={g.strip() for g in args.groups.split(",")} if args.groups else None,
+        prompts={p.strip() for p in args.prompts.split(",")} if args.prompts else None,
+        dry_run=args.dry_run,
+        timeout_s=args.timeout,
+    )
+    try:
+        result = run(config)
+    except (HarnessError, MissingSecretError) as exc:
+        print(f"FATAL: {exc}")
+        return 2
+    except SecretLeakError as exc:
+        print(f"FATAL: {exc}")
+        return 2
+
+    print(f"manifest   : {manifest.sha256[:16]}  ({manifest.path})")
+    print(f"run dir    : {result.run_dir}")
+    print(f"invocations: {len(result.results)}   (one fresh process each -- never batched)")
+    for meta in result.results:
+        flag = "  [outside cell groups]" if meta["outside_cell_groups"] else ""
+        if meta["harness_failure"]:
+            flag += f"  HARNESS FAILURE: {meta['harness_failure'][:70]}"
+        print(f"  {meta['prompt_id']:6s} {meta['cell']:14s} {meta['duration_s']:6.1f}s  "
+              f"{meta['trace_records']:>3} trace records  {meta['answer_chars']:>6} chars{flag}")
+    for cell in result.zero_trace_cells:
+        print(f"  BROKEN: cell {cell!r} recorded ZERO trace records across every invocation. "
+              "The tools were never called -- an empty run, not a clean one. Do not score it.")
+    for check in result.checks_report:
+        print(f"  check {check['id']}: {check['outcome']}  (matched {check['matched']})")
+    print(f"harness failures: {result.failures}  (these are NOT consumer results)")
+    print("This harness does not score. Pass/fail against the pinned criteria in each "
+          "meta.json is a human/spec-session judgment.")
+    return 1 if result.failures else 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="mcp-e2e", description=__doc__,
+                                     formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest="command", required=True)
+
+    p_validate = sub.add_parser("validate", help="load the manifest and lint its checks; run nothing")
+    p_validate.add_argument("--manifest", required=True)
+    p_validate.set_defaults(func=cmd_validate)
+
+    p_run = sub.add_parser("run", help="execute the (prompt x cell) grid and record artifacts")
+    p_run.add_argument("--manifest", required=True)
+    p_run.add_argument("--run-dir", default=None, help="output root (default runs/<utc-timestamp>)")
+    p_run.add_argument("--cells", default=None, help="comma-separated cell names (default: all)")
+    p_run.add_argument("--groups", default=None, help="restrict to these prompt groups")
+    p_run.add_argument("--prompts", default=None,
+                       help="restrict to these prompt ids; an id named here runs in every selected "
+                            "cell even if the cell's groups exclude it, marked outside_cell_groups")
+    p_run.add_argument("--dry-run", action="store_true",
+                       help="validate manifest, cells, and argv without calling any model or server")
+    p_run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S,
+                       help=f"per-invocation timeout in seconds (default {DEFAULT_TIMEOUT_S})")
+    p_run.set_defaults(func=cmd_run)
+
+    args = parser.parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    sys.exit(main())
