@@ -7,6 +7,7 @@ This directory is the spec for a harness that drives a model consumer against an
 - `10-harness.md` — the verification contract: division of labor, Layers 1 and 2, run mechanics, attribution, cells, grounding rules.
 - `20-manifest.md` — the suite manifest schema: the entire interface between a suite and the harness, including generic MCP server registration.
 - `30-checks.md` — the declarative Layer-1 check language and its evaluation semantics.
+- `40-instruments.md` — the registry of pinned instrument content (crowding procedures, by name/version/content hash); crowded runs are scoreable only against a pin listed there.
 - `90-open-questions.md` — open questions; route answers per `CLAUDE.md`.
 - `examples/congressmcp/` — the ancestor suite from congressMCP, kept verbatim as the worked example. Not normative; see its README for what is server-specific and where it deviates from `20-manifest.md`.
 
