@@ -1,6 +1,6 @@
 # What this is
 
-This is an MCP server for searching congressional bills. It uses BOTH the congress.gov and govinfo.gov APIs to do this. 
+This is a generic end-to-end test harness for testing MCP servers..
 
 # Conventions
 
