@@ -158,6 +158,21 @@ def test_dry_run_writes_layout_and_calls_nothing(tmp_path, fake_drivers):
 
 # ---------------------------------------------------------------- live (fake) runs
 
+def test_relative_run_dir_still_yields_absolute_config_paths(tmp_path, fake_drivers, monkeypatch):
+    # The consumer runs in a neutral temp cwd, so every path handed to the driver must
+    # survive a cwd change. Regression: a relative --run-dir made claude fail with
+    # "MCP config file not found" resolved against the neutral cwd (2026-08-31).
+    monkeypatch.chdir(tmp_path)
+    manifest = load(tmp_path, manifest_data())
+    config = RunConfig(manifest=manifest, run_dir=Path("relative-run"),
+                       cells=list(manifest.cells), drivers=fake_drivers, dry_run=True)
+    result = run(config)
+    assert result.run_dir.is_absolute()
+    config_path = Path(result.results[0]["command"][2])  # FakeDriver argv: [py, consumer, config]
+    assert config_path.is_absolute()
+    assert config_path.exists()
+
+
 def checks_for_tests() -> list[dict]:
     return [
         {"id": "content-typed", "description": "every response carries typed content",
@@ -257,7 +272,7 @@ def test_crowded_cell_runs_preturn_and_pins_procedure(tmp_path, fake_drivers):
     data = manifest_data()
     data["cells"]["basic"]["context"] = "crowded"
     data["cells"]["basic"]["crowding"] = {
-        "procedure": "neutral-file-triage@1",
+        "procedure": "neutral-file-triage@2",
         "collision_review": "2026-08-30: office logistics is disjoint from notes_sut",
     }
     config = config_for(tmp_path, data, fake_drivers)

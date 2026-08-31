@@ -477,6 +477,11 @@ def preflight(config: RunConfig) -> None:
 
 
 def run(config: RunConfig) -> RunResult:
+    # Every path handed to a driver or proxy must survive a cwd change: the consumer
+    # runs in a neutral temp directory, so a relative run dir would make the config
+    # paths resolve to nothing there (measured: every invocation of a live run failed
+    # with "MCP config file not found" under the neutral cwd, 2026-08-31).
+    config.run_dir = config.run_dir.resolve()
     preflight(config)
     manifest = config.manifest
     planned = plan_invocations(manifest, config.cells, config.groups, config.prompts)
