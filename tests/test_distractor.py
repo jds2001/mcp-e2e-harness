@@ -8,7 +8,7 @@ from mcp_e2e_harness.mcp_client import StdioMCPClient
 
 
 def client(tmp_path, state: bool = True) -> StdioMCPClient:
-    args = ["-m", "mcp_e2e_harness.distractor", "--procedure", "neutral-file-triage@1"]
+    args = ["-m", "mcp_e2e_harness.distractor", "--procedure", "neutral-file-triage@2"]
     if state:
         args += ["--state-file", str(tmp_path / "state.json")]
     return StdioMCPClient(sys.executable, args, timeout=30)

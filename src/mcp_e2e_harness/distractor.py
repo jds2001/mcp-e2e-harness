@@ -10,7 +10,7 @@ Filed/unfiled state persists across restarts via ``--state-file`` (the driver sp
 a fresh server process per turn; the task must stay coherent across the crowding
 pre-turn and the scored turn or the "mid-task" claim is fiction).
 
-    python -m mcp_e2e_harness.distractor --procedure neutral-file-triage@1 \
+    python -m mcp_e2e_harness.distractor --procedure neutral-file-triage@2 \
         --state-file /path/state.json
 """
 from __future__ import annotations

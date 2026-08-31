@@ -96,6 +96,36 @@ _TRIAGE_NOTES = (
          "contents card and note anything missing on the facilities form."),
 )
 
+# Version 2 (2026-08-31) supersedes v1, whose opening prompt asked the consumer to
+# keep filing "until they're done": measured on the first live crowded run
+# (claude-sonnet-5 pre-turn), the pre-turn completed the whole task ("All 12 notes
+# filed ... Inbox is now empty" in distractor-state.json), so the scored prompt landed
+# after the competing goal was gone -- not the "genuinely mid-way through" state ruling
+# S6 requires. v2 bounds the pre-turn to the first four notes, so at the scored turn
+# two-thirds of the task verifiably remains. The spec's ledger (40-instruments.md)
+# still pins v1; adopting v2 there is the spec session's ruling to make.
+NEUTRAL_FILE_TRIAGE_V2 = CrowdingProcedure(
+    name="neutral-file-triage",
+    version=2,
+    server_name="shared_notes",
+    folders=("logistics", "facilities", "social", "archive"),
+    notes=_TRIAGE_NOTES,
+    opening_prompt=(
+        "You're helping tidy the office's shared notes inbox before the desk moves. Use the "
+        "shared_notes tools: list the unfiled notes, then work through them one at a time -- read "
+        "each note and file it into whichever folder fits best (logistics, facilities, social, or "
+        "archive). There are quite a few and we'll be interleaving this with other things, so for "
+        "now file just the first four on the list and then stop; we'll keep going in a bit, and "
+        "the rest MUST wait until you get the go-ahead."
+    ),
+)
+
+# Version 1 stays registered VERBATIM: the spec's instrument ledger
+# (documentation/40-instruments.md) pins neutral-file-triage@1 by content hash, and
+# retiring or editing it here would break that pin's verifiability -- re-pinning is the
+# spec session's call, not this file's. Do not select it for new suites: the pre-turn
+# defect above is why v2 exists. tests/test_crowding.py asserts this object still
+# hashes to the pinned value.
 NEUTRAL_FILE_TRIAGE_V1 = CrowdingProcedure(
     name="neutral-file-triage",
     version=1,
@@ -113,6 +143,7 @@ NEUTRAL_FILE_TRIAGE_V1 = CrowdingProcedure(
 
 PROCEDURES: dict[str, CrowdingProcedure] = {
     NEUTRAL_FILE_TRIAGE_V1.full_name: NEUTRAL_FILE_TRIAGE_V1,
+    NEUTRAL_FILE_TRIAGE_V2.full_name: NEUTRAL_FILE_TRIAGE_V2,
 }
 
 

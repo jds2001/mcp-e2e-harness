@@ -53,7 +53,7 @@ BASE_MANIFEST: dict = {
         "transport": {
             "type": "stdio",
             "command": sys.executable,
-            "args": ["-m", "mcp_e2e_harness.distractor", "--procedure", "neutral-file-triage@1"],
+            "args": ["-m", "mcp_e2e_harness.distractor", "--procedure", "neutral-file-triage@2"],
         },
     },
     "cells": {

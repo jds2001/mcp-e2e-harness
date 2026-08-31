@@ -140,7 +140,7 @@ def test_crowded_requires_crowding_block():
     with pytest.raises(ManifestError, match="crowding"):
         validate_manifest(data)
     data["cells"]["basic"]["crowding"] = {
-        "procedure": "neutral-file-triage@1",
+        "procedure": "neutral-file-triage@2",
         "collision_review": "2026-08-30: office logistics is disjoint from notes_sut",
     }
     validate_manifest(data)
@@ -157,7 +157,7 @@ def test_unknown_crowding_procedure_is_a_load_error():
 
 def test_fresh_cell_with_crowding_block_is_a_load_error():
     data = valid()
-    data["cells"]["basic"]["crowding"] = {"procedure": "neutral-file-triage@1",
+    data["cells"]["basic"]["crowding"] = {"procedure": "neutral-file-triage@2",
                                           "collision_review": "dated"}
     with pytest.raises(ManifestError, match="crowded"):
         validate_manifest(data)
@@ -167,7 +167,7 @@ def test_crowding_server_name_collision_is_a_load_error():
     data = valid()
     data["server"]["name"] = "shared_notes"  # the procedure's distractor server name
     data["cells"]["basic"]["context"] = "crowded"
-    data["cells"]["basic"]["crowding"] = {"procedure": "neutral-file-triage@1",
+    data["cells"]["basic"]["crowding"] = {"procedure": "neutral-file-triage@2",
                                           "collision_review": "dated"}
     with pytest.raises(ManifestError, match="collides"):
         validate_manifest(data)
