@@ -464,7 +464,10 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     api_surface: dict | None = None
     if recorder is not None:
         api_surface = summarize(dest / "api-surface.jsonl", driver.disallowed_builtins) or {
-            "requests_with_tools": 0, "tool_names_union": [], "disallowed_builtins_on_wire": []}
+            "requests_recorded": 0, "requests_with_tools": 0,
+            "tool_names_union": [], "disallowed_builtins_on_wire": []}
+        api_surface["unparseable_requests"] = recorder.unrecorded_requests
+        api_surface["unparseable_encodings"] = sorted(recorder.unrecorded_encodings)
         api_surface["upstream_forward_errors"] = recorder.forward_errors
         if harness_failure is None:
             if api_surface["disallowed_builtins_on_wire"]:
@@ -475,13 +478,19 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
                     "disallowed builtin(s) "
                     f"{api_surface['disallowed_builtins_on_wire']} observed in the tools array "
                     "sent to the model -- instrument breach; claims not tool-attributable")
-            elif api_surface["requests_with_tools"] == 0:
-                # An answer with zero captured model requests means the driver did not
-                # route through the capture; unverified must never read as verified.
+            elif api_surface["requests_recorded"] == 0:
+                # An answer with zero recorded model requests means the driver either
+                # did not route through the capture or sent nothing the recorder could
+                # read; unverified must never read as verified. A tool-less request is
+                # recorded (tool_names null) and does NOT trip this: a request offering
+                # no tools offers no builtins.
+                detail = (f" ({api_surface['unparseable_requests']} request(s) arrived but "
+                          f"could not be parsed; encodings seen: "
+                          f"{api_surface['unparseable_encodings']})"
+                          if api_surface["unparseable_requests"] else "")
                 harness_failure = (
-                    "API surface capture recorded zero model requests carrying a tools "
-                    "array: the driver did not route through the capture proxy, so "
-                    "builtin absence is unverified for this invocation")
+                    "API surface capture recorded zero readable model requests: builtin "
+                    f"absence is unverified for this invocation{detail}")
 
     duration = round(time.perf_counter() - t0, 2)
     records, parse_errors = _read_trace(dest / "trace.jsonl")

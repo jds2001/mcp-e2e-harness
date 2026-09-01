@@ -28,6 +28,42 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+def _extract_tool_names(payload: dict) -> tuple[list[str] | None, str | None]:
+    """The tool surface a request declares, wherever this API dialect carries it.
+
+    Two measured channels (2026-09-01):
+
+    * ``tools`` array (standard Responses/Messages shape). name-or-type: hosted tools
+      (web_search and kin) carry a ``type`` and no ``name``; recording only names
+      would blind the disallowed check to exactly the tools it exists to catch.
+    * ``client_metadata["x-codex-turn-metadata"].code_mode_tool_names`` -- codex-family
+      models ("code mode") send NO tools array even in a working tool-calling turn;
+      the roster the backend-injected harness serves travels here as a name->
+      {name, namespace} map. Measured by full-body probe: the mcp__* tools the
+      consumer actually called appear only in this map.
+
+    Returns (names, source) -- (None, None) when the request declares no surface.
+    Only key names are ever taken; never schemas or content.
+    """
+    tools = payload.get("tools")
+    if isinstance(tools, list):
+        names = [t.get("name") or t.get("type") for t in tools if isinstance(t, dict)]
+        return [n for n in names if n], "tools"
+    meta = payload.get("client_metadata")
+    if isinstance(meta, dict):
+        turn_meta = meta.get("x-codex-turn-metadata")
+        if isinstance(turn_meta, str):
+            try:
+                turn_meta = json.loads(turn_meta)
+            except json.JSONDecodeError:
+                turn_meta = None
+        if isinstance(turn_meta, dict):
+            code_mode = turn_meta.get("code_mode_tool_names")
+            if isinstance(code_mode, dict):
+                return sorted(code_mode.keys()), "code_mode_tool_names"
+    return None, None
+
+
 # Hop-by-hop headers; everything else is forwarded verbatim in both directions.
 _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
                "te", "trailers", "transfer-encoding", "upgrade", "host", "content-length"}
@@ -44,6 +80,7 @@ class ApiSurfaceRecorder:
         self._lock = threading.Lock()
         self._seq = 0
         self.unrecorded_requests = 0
+        self.unrecorded_encodings: set[str] = set()
         self.forward_errors = 0
         self._server: ThreadingHTTPServer | None = None
 
@@ -67,7 +104,18 @@ class ApiSurfaceRecorder:
 
             do_GET = do_POST = do_PUT = do_DELETE = do_PATCH = do_HEAD = do_OPTIONS = _handle
 
-        self._server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        class QuietServer(ThreadingHTTPServer):
+            def handle_error(self, request, client_address):  # noqa: ARG002
+                # Keep-alive sockets reset by the driver between requests are normal
+                # (measured with codex 2026-09-01); a traceback per reset floods the
+                # operator's terminal with noise that reads like instrument failure.
+                import sys as _sys
+                exc = _sys.exception()
+                if isinstance(exc, (ConnectionResetError, BrokenPipeError, TimeoutError)):
+                    return
+                super().handle_error(request, client_address)
+
+        self._server = QuietServer(("127.0.0.1", 0), Handler)
         self._server.daemon_threads = True
         threading.Thread(target=self._server.serve_forever, daemon=True).start()
         return self.url
@@ -80,21 +128,27 @@ class ApiSurfaceRecorder:
 
     # ---------------------------------------------------------------- recording
 
-    def _record(self, path: str, body: bytes) -> None:
+    def _record(self, path: str, body: bytes, content_encoding: str | None) -> None:
+        """One JSONL line per parseable request -- tool-less requests included.
+
+        A request with no ``tools`` array is recorded with ``tool_names: null``
+        (measured 2026-09-01: codex sends tool-less requests as part of a working
+        turn, and recording only tools-carrying requests made "routed but tool-less"
+        indistinguishable from "never routed" -- an instrument reading its own gap as
+        a driver failure). ``body_keys`` names the request's top-level keys so an
+        alternate tool-delivery channel is visible; still never headers, message
+        content, or schemas.
+        """
         try:
             payload = json.loads(body)
-            tools = payload.get("tools")
-            if not isinstance(tools, list):
+            if not isinstance(payload, dict):
                 raise ValueError
-            # name-or-type: hosted tools in the Responses API (web_search and kin)
-            # carry a "type" and no "name"; recording only names would blind the
-            # disallowed-builtins check to exactly the tools it exists to catch.
-            names = [t.get("name") or t.get("type") for t in tools if isinstance(t, dict)]
-            names = [n for n in names if n]
-        except (json.JSONDecodeError, UnicodeDecodeError, AttributeError, ValueError):
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
             with self._lock:
                 self.unrecorded_requests += 1
+                self.unrecorded_encodings.add(content_encoding or "identity")
             return
+        names, source = _extract_tool_names(payload)
         with self._lock:
             self._seq += 1
             line = json.dumps({
@@ -103,6 +157,8 @@ class ApiSurfaceRecorder:
                 "path": path.split("?")[0],
                 "model": payload.get("model"),
                 "tool_names": names,
+                "tool_source": source,
+                "body_keys": sorted(payload.keys()),
             })
             with open(self.record_file, "a", encoding="utf-8") as handle:
                 handle.write(line + "\n")
@@ -130,7 +186,7 @@ class ApiSurfaceRecorder:
     def _proxy(self, handler: BaseHTTPRequestHandler) -> None:
         body = self._read_body(handler)
         if body:
-            self._record(handler.path, body)
+            self._record(handler.path, body, handler.headers.get("Content-Encoding"))
 
         conn_cls = HTTPSConnection if self.upstream.scheme == "https" else HTTPConnection
         conn = conn_cls(self.upstream.netloc, timeout=600)
@@ -182,13 +238,15 @@ def summarize(record_file: Path, disallowed: tuple[str, ...]) -> dict | None:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
+    with_tools = [r for r in records if r.get("tool_names") is not None]
     union: list[str] = []
-    for record in records:
-        for name in record.get("tool_names") or []:
+    for record in with_tools:
+        for name in record["tool_names"]:
             if name not in union:
                 union.append(name)
     return {
-        "requests_with_tools": len(records),
+        "requests_recorded": len(records),
+        "requests_with_tools": len(with_tools),
         "tool_names_union": union,
         "disallowed_builtins_on_wire": [n for n in disallowed if n in union],
     }
