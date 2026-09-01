@@ -50,9 +50,25 @@ that cannot live on argv (CODEX_HOME) is asserted from the turn's env overrides,
 which the runner applies and records. Sessions are unsupported (``codex exec`` has no
 resume idiom the harness trusts), so crowded cells are refused at preflight.
 
-Q2 for codex is OPEN until a real cell under this harness's instruments shows a wire
-capture with only MCP tools, zero web-search events, and the secrets-file canary
-(50-drivers.md, closing paragraph).
+Q2-settling evidence, measured 2026-09-01 under this harness's instruments (codex-cli
+0.147.0, real key, runs/2026-09-01-codex-driver-proof and -codex-secret-canary; the
+ruling itself is the spec session's):
+
+* Wire capture across a real cell: codex-family models ("code mode") send NO ``tools``
+  array; the roster travels in ``client_metadata["x-codex-turn-metadata"].
+  code_mode_tool_names`` (found by full-body probe after the tools-array capture came
+  back empty on a working turn), which the recorder now reads. The captured surface
+  held the MCP tools the consumer called and no web tool; zero web events; answer
+  grounded in the traced call. Caveat for the scorer: code-mode metadata is the
+  client's declaration of the backend-injected harness -- wire-observed and not
+  model-mediated, but it describes the served toolset rather than constituting it the
+  way a ``tools`` array does.
+* Model dependence: gpt-5.2 DOES use the ``tools`` array and carries a hosted
+  ``web_search`` (``external_web_access: false``) that no config knob removes; the
+  breach check BREAKS such cells. Model choice is load-bearing.
+* Secrets canary: a SUT that refuses to start without its ``$secret`` served
+  normally under codex (which sanitizes spawned-server env), the value appeared in no
+  artifact, and the 0600 file was deleted at invocation end.
 """
 from __future__ import annotations
 
