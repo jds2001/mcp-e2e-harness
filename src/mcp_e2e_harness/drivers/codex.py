@@ -69,6 +69,15 @@ ruling itself is the spec session's):
 * Secrets canary: a SUT that refuses to start without its ``$secret`` served
   normally under codex (which sanitizes spawned-server env), the value appeared in no
   artifact, and the 0600 file was deleted at invocation end.
+* Egress canary (the Q2-settling residual: exec_command/apply_patch are
+  network-capable channels whose egress control is the sandbox, previously measured
+  blocked only externally): ``mcp-e2e probe-egress --driver codex`` ran the fetch
+  under the exact cell configuration; the event stream shows the curl executed in the
+  neutral cwd and failing DNS (``curl: (6) Could not resolve host``), the consumer
+  reported the exact honest-failure protocol, and the wire showed no web tool during
+  the canary (runs/2026-09-01-codex-egress-canary). Per the settling ruling, scoring
+  of codex attribution cells still reviews recorded exec events alongside the trace;
+  the events land in runner-stdout.txt / runner-stderr.txt per invocation.
 """
 from __future__ import annotations
 
@@ -103,6 +112,10 @@ class CodexDriver(Driver):
     # prints; never remove the spaced form.
     web_event_markers = ("web.run", "web_search", "web-search", "web search", "web__run")
     probe_model = ""  # capture-capable; the calibration probe is not this driver's path
+    # The code-mode surface retains exec_command/apply_patch (network-capable
+    # channels whose egress control is the sandbox); the egress canary measures that
+    # control under harness instruments. gpt-5.6-luna is the measured-clean model.
+    egress_probe_model = "gpt-5.6-luna"
     api_base_env = "OPENAI_BASE_URL"
     api_default_upstream = "https://api.openai.com"
     sanitizes_mcp_env = True

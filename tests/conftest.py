@@ -35,6 +35,7 @@ class FakeDriver(Driver):
     executable = sys.executable
     disallowed_builtins = ("FakeWeb",)
     probe_model = "fake-model-1"
+    egress_probe_model = "fake-model-1"
 
     def write_driver_config(self, dest: Path, server_entries: dict[str, dict]) -> Path:
         path = dest / "mcp-config.json"

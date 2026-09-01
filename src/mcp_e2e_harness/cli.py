@@ -20,10 +20,13 @@ from .drivers import DRIVERS
 from .manifest import Manifest, ManifestError, load_manifest
 from .runner import (
     DEFAULT_TIMEOUT_S,
+    EGRESS_PASS,
+    EGRESS_PROBE_URL,
     PROBE_PASS,
     HarnessError,
     RunConfig,
     probe_builtin_surface,
+    probe_egress,
     run,
 )
 from .secrets import MissingSecretError, SecretLeakError
@@ -109,6 +112,30 @@ def cmd_probe_driver(args: argparse.Namespace) -> int:
     return 0 if record["verdict"] == PROBE_PASS else 1
 
 
+def cmd_probe_egress(args: argparse.Namespace) -> int:
+    driver = DRIVERS.get(args.driver)
+    if driver is None:
+        print(f"FATAL: unknown driver {args.driver!r} (available: {sorted(DRIVERS)})")
+        return 2
+    out = Path(args.out) if args.out else (
+        Path.cwd() / "runs" / f"egress-probe-{args.driver}-"
+        f"{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}")
+    try:
+        record = probe_egress(driver, out, model=args.model, url=args.url,
+                              timeout_s=args.timeout)
+    except HarnessError as exc:
+        print(f"FATAL: {exc}")
+        return 2
+    print(f"driver     : {record['driver']['id']}  [{record['driver']['cli_version']}]")
+    print(f"model      : {record['model']}")
+    print(f"url        : {record['url']}")
+    print(f"verdict    : {record['verdict']}")
+    if record["detail"]:
+        print(f"detail     : {record['detail']}")
+    print(f"evidence   : {out / 'probe.json'}  (answer verbatim, exec event stream, wire capture)")
+    return 0 if record["verdict"] == EGRESS_PASS else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mcp-e2e", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -145,6 +172,22 @@ def main(argv: list[str] | None = None) -> int:
                          help="artifact directory (default runs/driver-probe-<driver>-<utc>)")
     p_probe.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
     p_probe.set_defaults(func=cmd_probe_driver)
+
+    p_egress = sub.add_parser(
+        "probe-egress",
+        help="egress canary: measure under harness instruments that a driver's "
+             "shell-shaped egress fails honestly (one small model turn; only the exact "
+             "honest-failure protocol passes)")
+    p_egress.add_argument("--driver", required=True)
+    p_egress.add_argument("--model", default=None,
+                          help="model for the canary turn (default: the driver's "
+                               "egress_probe_model)")
+    p_egress.add_argument("--url", default=EGRESS_PROBE_URL,
+                          help=f"pinned fetch target (default {EGRESS_PROBE_URL})")
+    p_egress.add_argument("--out", default=None,
+                          help="artifact directory (default runs/egress-probe-<driver>-<utc>)")
+    p_egress.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
+    p_egress.set_defaults(func=cmd_probe_egress)
 
     args = parser.parse_args(argv)
     return args.func(args)

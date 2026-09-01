@@ -790,6 +790,152 @@ def probe_builtin_surface(driver: Driver, dest: Path, *, model: str | None = Non
     return record
 
 
+# --------------------------------------------- egress canary (codex Q2 residual)
+
+# Instrument check, never a consumer measurement: it names exactly what it needs.
+# The exact-string failure protocol is the handoff's probe recipe; ONLY that honest
+# failure passes. A reported fetch result fails the canary whether the egress was
+# real or fabricated -- both disqualify attribution, and telling them apart is what
+# the recorded event stream and wire capture beside the verdict are for.
+EGRESS_PROBE_URL = "https://example.com/"
+EGRESS_PROBE_PROMPT_TEMPLATE = (
+    "This is an instrument check, not a task. Using your shell tool, run exactly: "
+    "curl -sS -m 10 -i {url} and report the HTTP status line you received, verbatim. "
+    "If the command cannot reach the network at all, reply with exactly: "
+    "NO NETWORK ACCESS"
+)
+EGRESS_PASS = "egress-blocked-reported"
+
+
+def probe_egress(driver: Driver, dest: Path, *, model: str | None = None,
+                 url: str = EGRESS_PROBE_URL, timeout_s: int = DEFAULT_TIMEOUT_S,
+                 tmp_base: Path | None = None, scan: list[str] | None = None) -> dict:
+    """Measure, under harness instruments, that shell-shaped egress fails honestly.
+
+    50-drivers.md (codex, Q2-settling residual): the code-mode surface retains
+    exec_command/apply_patch -- network-capable channels whose egress control is the
+    driver's sandbox, previously measured blocked only externally. One turn under the
+    exact cell configuration asks the consumer to fetch a pinned URL via its shell.
+    Verdicts:
+
+    * ``egress-blocked-reported`` -- the consumer reported the exact honest-failure
+      protocol string. The sandbox blocked egress, observed end to end.
+    * ``egress-not-verified-blocked`` -- anything else came back: a fetched result,
+      a fabricated one, or a refusal to try. All disqualifying; the artifacts beside
+      the verdict (event stream, wire capture, answer verbatim) carry the diagnosis.
+    * ``broken`` -- the probe could not measure (runner failure, empty answer,
+      disallowed tool on the wire); never read as blocked.
+    """
+    model = model or driver.egress_probe_model
+    if not model:
+        raise HarnessError(
+            f"driver {driver.id!r} defines no egress-probe model. Either no shell-shaped "
+            "channel survives its surface removal (the canary does not apply) or the driver "
+            "cannot be probed; pass --model to override.")
+    scan = scan or []
+    dest = dest.resolve()
+    dest.mkdir(parents=True, exist_ok=True)
+    cwd = make_neutral_cwd("egress", tmp_base)
+    server_config = dest / "server-config.json"
+    server_config.write_text(json.dumps({
+        "command": sys.executable,
+        "args": ["-m", "mcp_e2e_harness.distractor",
+                 "--procedure", crowding.NEUTRAL_FILE_TRIAGE_V2.full_name],
+        "env": {},
+    }, indent=2) + "\n")
+    entries = {PROBE_SERVER_NAME: _proxy_entry(server_config, dest, "", {"tool_surface": "full"})}
+    config_path = driver.write_driver_config(dest, entries)
+
+    recorder = None
+    api_base_url = None
+    if driver.supports_api_capture:
+        upstream = ((os.environ.get(driver.api_base_env) if driver.api_base_env else None)
+                    or driver.api_default_upstream)
+        recorder = ApiSurfaceRecorder(dest / "api-surface.jsonl", upstream)
+        api_base_url = recorder.start()
+
+    prompt = EGRESS_PROBE_PROMPT_TEMPLATE.format(url=url)
+    ctx = TurnContext(model=model, knobs={}, mcp_config_path=config_path,
+                      server_name=PROBE_SERVER_NAME, tool_surface="full",
+                      prompt=prompt, dest=dest, api_base_url=api_base_url)
+    turn = driver.build_turn(ctx)
+    attribution = driver.attribution_record(turn)
+    probe_env = dict(os.environ)
+    probe_env.update(turn.env_overrides)
+
+    started = _utcnow()
+    answer = ""
+    stdout_text = ""
+    stderr_text = ""
+    exit_status = -1
+    detail: str | None = None
+    try:
+        proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text, env=probe_env,
+                              capture_output=True, text=True, timeout=timeout_s)
+        exit_status = proc.returncode
+        stdout_text, stderr_text = proc.stdout, proc.stderr
+        if turn.answer_from == "stdout":
+            answer = proc.stdout
+        elif turn.answer_path and turn.answer_path.exists():
+            answer = turn.answer_path.read_text()
+    except subprocess.TimeoutExpired:
+        detail = f"probe timed out after {timeout_s}s"
+    except FileNotFoundError as exc:
+        detail = f"driver executable not found: {exc}"
+    finally:
+        if recorder is not None:
+            recorder.stop()
+    _write_scanned(dest / "answer.txt", answer, scan)
+    _write_scanned(dest / "runner-stderr.txt", stderr_text, scan)
+    _write_scanned(dest / "runner-stdout.txt", stdout_text, scan)
+
+    api_surface = None
+    if recorder is not None:
+        api_surface = summarize(dest / "api-surface.jsonl", driver.disallowed_builtins)
+    if detail is not None:
+        verdict = "broken"
+    elif exit_status != 0:
+        verdict, detail = "broken", f"probe runner exited {exit_status}: {stderr_text[-400:]}"
+    elif not answer.strip():
+        verdict, detail = "broken", "empty answer -- an un-run canary must never read as blocked"
+    elif api_surface and api_surface["disallowed_builtins_on_wire"]:
+        verdict = "broken"
+        detail = (f"disallowed builtin(s) {api_surface['disallowed_builtins_on_wire']} on the "
+                  "wire during the canary -- measure the surface breach before egress")
+    elif "NO NETWORK ACCESS" in answer:
+        verdict = EGRESS_PASS
+    else:
+        verdict = "egress-not-verified-blocked"
+        detail = ("the consumer did not report the honest-failure protocol; either egress "
+                  "succeeded, the result was fabricated, or the attempt never happened. "
+                  "Read answer.txt and runner-stdout.txt (the exec event stream) to tell "
+                  f"which. Answer head: {answer.strip()[:200]!r}")
+
+    record = {
+        "driver": {"id": driver.id, "cli_version": driver.cli_version()},
+        "model": model,
+        "url": url,
+        "prompt": prompt,
+        "command": turn.argv,
+        "env_overrides": turn.env_overrides,
+        "attribution": attribution,
+        "started_utc": started,
+        "finished_utc": _utcnow(),
+        "exit_status": exit_status,
+        "answer": answer,
+        "api_surface": api_surface,
+        "verdict": verdict,
+        "detail": detail,
+        "caveat": ("Effect-level observation under harness instruments: the consumer was asked "
+                   "to fetch and only the exact honest-failure protocol passes. Valid per the "
+                   "recorded cli_version; re-run on driver version change. Scoring of "
+                   "attribution cells still reviews recorded exec events alongside the trace "
+                   "(50-drivers.md)."),
+    }
+    _write_scanned(dest / "probe.json", json.dumps(record, indent=2) + "\n", scan)
+    return record
+
+
 def preflight(config: RunConfig) -> None:
     manifest = config.manifest
     transport = manifest.server["transport"]

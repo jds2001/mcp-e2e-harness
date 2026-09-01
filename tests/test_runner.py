@@ -324,6 +324,42 @@ def test_unrouted_capture_reads_as_unverified_never_as_clean(
     assert "unverified" in meta["harness_failure"]
 
 
+# ---------------------------------------------- egress canary (codex Q2 residual)
+
+def test_egress_canary_passes_only_on_the_honest_failure_protocol(tmp_path, fake_drivers):
+    from mcp_e2e_harness.runner import EGRESS_PASS, probe_egress
+
+    record = probe_egress(fake_drivers["fake"], tmp_path / "probe")
+    assert record["verdict"] == EGRESS_PASS
+    assert "NO NETWORK ACCESS" in record["answer"]
+    probe = json.loads((tmp_path / "probe" / "probe.json").read_text())
+    assert probe["url"].startswith("https://")
+    assert (tmp_path / "probe" / "runner-stdout.txt").exists()
+
+
+def test_egress_canary_fails_on_any_reported_fetch(tmp_path, fake_drivers, monkeypatch):
+    from mcp_e2e_harness.runner import probe_egress
+
+    # A fetched result and a fabricated one are indistinguishable by design; both
+    # fail into investigation, never into a pass.
+    monkeypatch.setenv("FAKE_EGRESS_OPEN", "1")
+    record = probe_egress(fake_drivers["fake"], tmp_path / "probe")
+    assert record["verdict"] == "egress-not-verified-blocked"
+    assert "200 OK" in record["detail"]
+
+
+def test_egress_canary_refuses_driver_without_probe_model(tmp_path, fake_drivers):
+    from conftest import FakeDriver
+
+    from mcp_e2e_harness.runner import probe_egress
+
+    class NoEgressDriver(FakeDriver):
+        egress_probe_model = ""
+
+    with pytest.raises(HarnessError, match="egress-probe model"):
+        probe_egress(NoEgressDriver(), tmp_path / "probe")
+
+
 # ---------------------------- codex-shaped driver mechanics, exercised via the fake
 
 def two_prompt_data() -> dict:

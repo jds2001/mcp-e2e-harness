@@ -55,6 +55,15 @@ def main() -> int:
                                          method="POST")
         urllib.request.urlopen(request, timeout=30).read()
 
+    if "NO NETWORK ACCESS" in prompt:
+        # The egress canary. FAKE_EGRESS_OPEN simulates a sandbox that let the
+        # fetch through (or a fabricated success -- indistinguishable by design).
+        if os.environ.get("FAKE_EGRESS_OPEN"):
+            print("HTTP/1.1 200 OK -- fetched just fine")
+        else:
+            print("NO NETWORK ACCESS")
+        return 0
+
     if "instrument check" in prompt:
         # The builtin-surface probe: enumerate tools, one name per line.
         if os.environ.get("FAKE_PROBE_SILENT"):

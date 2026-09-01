@@ -66,6 +66,12 @@ class Driver(ABC):
     # Default model for the builtin-surface probe when none is given, in the driver's
     # own vocabulary. Empty means the driver cannot be probed.
     probe_model: str = ""
+    # Default model for the egress canary (50-drivers.md, codex residual): a driver
+    # whose consumer retains shell-shaped tools must demonstrate, under harness
+    # instruments, that a network fetch from that shell fails honestly. Empty means
+    # the canary does not apply (no shell-shaped channel survives the driver's
+    # surface removal) or the driver cannot run it.
+    egress_probe_model: str = ""
     # Harness env var that overrides this driver's API upstream (e.g. an operator's
     # gateway); consulted before api_default_upstream.
     api_base_env: str = ""
