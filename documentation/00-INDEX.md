@@ -8,6 +8,8 @@ This directory is the spec for a harness that drives a model consumer against an
 - `20-manifest.md` — the suite manifest schema: the entire interface between a suite and the harness, including generic MCP server registration.
 - `30-checks.md` — the declarative Layer-1 check language and its evaluation semantics.
 - `40-instruments.md` — the registry of pinned instrument content (crowding procedures, by name/version/content hash); crowded runs are scoreable only against a pin listed there.
+- `50-drivers.md` — per-driver attribution contracts: how each driver meets the `10-harness.md` obligations, version-pinned; drivers absent from it host no attribution-dependent scoring.
+- `codex-driver-handoff.md` — external measurements from the uscode-mcp spec session (verbatim, provenance for the codex entry in `50-drivers.md`).
 - `90-open-questions.md` — open questions; route answers per `CLAUDE.md`.
 - `examples/congressmcp/` — the ancestor suite from congressMCP, kept verbatim as the worked example. Not normative; see its README for what is server-specific and where it deviates from `20-manifest.md`.
 

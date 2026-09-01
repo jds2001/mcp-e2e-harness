@@ -34,7 +34,7 @@ A map of cell id → cell. Fields:
 
 | field | required | what |
 |---|---|---|
-| `driver` | yes | driver id (e.g. `claude-code`); the roster of supported drivers is an implementation property, but each driver's attribution capabilities must satisfy `10-harness.md` before it may host attribution cells |
+| `driver` | yes | driver id (e.g. `claude-code`); the roster of supported drivers is an implementation property, but each driver's attribution contract must be recorded in `50-drivers.md` before attribution-dependent scoring |
 | `model` | yes | model id, verbatim in the driver's vocabulary |
 | `knobs` | yes | object of driver-native settings, verbatim (`thinking`, `reasoning_effort`, …); never translated, never defaulted by the harness |
 | `role` | yes | short matrix role (`floor`, `ceiling`, `capability-floor`, `isolation`, `cross-vendor-*`, or suite-defined) |
