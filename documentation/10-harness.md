@@ -19,7 +19,7 @@ Assertions a program can check against every trace record, with no judgment invo
 Exactly two Layer-1 behaviors are built into the harness rather than supplied by the suite, because they protect the instrument rather than the server contract:
 
 - **Secret hygiene**: no configured secret material (anything the server registration marked as secret, plus values of env vars the suite names as sensitive) appears in any trace record, transcript, or meta artifact. This is not waivable by a suite.
-- **Instrument liveness**: a run of a cell that produced zero trace records is reported as BROKEN, never as an abstention, a pass, or a vacuous result. A single-prompt cell with an empty trace is the canonical case.
+- **Instrument liveness**: a run of a cell that produced zero trace records is reported as BROKEN, never as an abstention, a pass, or a vacuous result. A single-prompt cell with an empty trace is the canonical case. Liveness is also enforced **at spawn, fail-fast** (ruling S8): if the server under test exits, or fails to advertise its tools, before the consumer turn begins, the cell is BROKEN at that moment and the model turn is not spent — and the breach is surfaced to the operator as it happens, because an operator watching a run must be able to distinguish in-flight from broken. Grounded in the first real suite's first run (2026-08-31): a cwd-dependent launch command died at spawn with `server_exit` faithfully recorded in the proxy meta, yet three cells of model turns were spent against a dead server while the consumer answered from priors and the operator read the run as hung.
 
 ## Layer 2 — consumer-behavior findings (human/spec-scored)
 
