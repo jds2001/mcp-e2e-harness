@@ -1,0 +1,42 @@
+{
+  "_about": "Codex smoke suite: one cross-vendor cell against the harness's own distractor server, for proving the codex driver's mechanics live (50-drivers.md). Kept separate from prompts.json so the claude-only smoke stays runnable without an OpenAI key: this suite's preflight refuses to run unless OPENAI_API_KEY is exported (the noweb custom provider authenticates via env_key; the value reaches codex by process env only and appears in no artifact).",
+  "_q2": "Running this live is part of, not all of, settling Q2 for codex (50-drivers.md, closing paragraph): a healthy run's api-surface.jsonl must show only MCP tools (no web_search), zero web-search events in runner-stdout.txt/runner-stderr.txt, and meta.json pins the codex version. The secrets-file canary needs a suite whose server takes a $secret, which this SUT does not.",
+  "suite": {
+    "name": "harness-smoke-codex",
+    "spec": "documentation/50-drivers.md",
+    "manifest_version": "1"
+  },
+  "server": {
+    "name": "notes_sut",
+    "transport": {
+      "type": "stdio",
+      "command": "python3",
+      "args": ["-m", "mcp_e2e_harness.distractor", "--procedure", "neutral-file-triage@2"]
+    }
+  },
+  "cells": {
+    "smoke-codex": {
+      "_": "proves: isolated CODEX_HOME, noweb provider routed through the harness recorder, read-only sandbox with never-approvals plus per-server MCP pre-approval, answer via -o file, reasoning_effort in codex's own vocabulary. Model choice is load-bearing: the tool roster codex sends is MODEL-dependent (measured 2026-09-01 on codex-cli 0.147.0 by wire capture: gpt-5.2 carries a hosted web_search tool that NO config knob removes -- tools.web_search=false, web_search_mode, tools.web_search.mode all left it in the array -- while gpt-5.6-luna's array carries no web tool). A cell on a web-carrying model gets BROKEN by the wire breach check, by design.",
+      "driver": "codex",
+      "model": "gpt-5.6-luna",
+      "knobs": {"reasoning_effort": "medium"},
+      "role": "cross-vendor-floor",
+      "context": "fresh",
+      "tool_surface": "full",
+      "merge_gating": false,
+      "groups": ["S"]
+    }
+  },
+  "prompts": [
+    {
+      "id": "S1",
+      "group": "S",
+      "title": "count the unfiled notes via a traced call",
+      "prompt": "Using the notes_sut server's tools, find out how many unfiled notes there are and reply with just the number.",
+      "sourcing": "measured",
+      "grounding": "neutral-file-triage@2 defines exactly 12 notes and no state file is configured for the SUT, so a fresh server process always reports 12 unfiled (src/mcp_e2e_harness/crowding.py, _TRIAGE_NOTES).",
+      "pass": "Answers 12, and the cell's trace contains a notes_sut list_unfiled_notes call.",
+      "fail": "Answers without a traced notes_sut call (the number is discoverable no other way), or answers a number other than 12."
+    }
+  ]
+}

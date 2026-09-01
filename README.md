@@ -53,6 +53,11 @@ uv run mcp-e2e probe-driver --driver claude-code    # one small model call; no m
 
 The probe already earned its keep once: it caught that claude's `--disallowed-tools` denies invocation but leaves builtins on the consumer's surface, which is why the driver now also passes `--tools ""` (surface removal, with disallow kept as the belt).
 
+## Drivers
+
+- **claude-code** — verified; Q2 settled (documentation/50-drivers.md).
+- **codex** — implemented to the 50-drivers.md contract: API-key credentials only (a fresh, harness-authored `CODEX_HOME` per invocation carries no login state; preflight refuses without `OPENAI_API_KEY`), web disabled via a noweb custom provider whose `base_url` **is** the harness recorder (one interposition yields both the web-disable and the wire verification), a spawn-time 0600 secrets file for MCP servers (codex sanitizes their env, so `$secret` inheritance delivers nothing), `reasoning_effort` verbatim, and hard breach semantics: a `web_search` in a wire-captured tools array or a web event in the driver's streams BREAKS the cell. Measured 2026-09-01 (codex-cli 0.147.0, wire capture): the tool roster is **model-dependent** — `gpt-5.2` carries a hosted `web_search` (`external_web_access: false`) that no config knob removes (`tools.web_search=false`, `web_search_mode`, `tools.web_search.mode` all dead at the array level), while `gpt-5.6-luna` offers no web tool — so model choice is load-bearing for codex attribution cells, and the per-invocation capture enforces it. Q2 for codex stays open until a real cell settles it under a valid key; `examples/smoke/codex-prompts.json` is the vehicle.
+
 ## Crowded cells
 
 `context: "crowded"` cells select a harness-owned, versioned crowding procedure by name (e.g. `neutral-file-triage@2`): the harness registers a distractor MCP server beside the server under test and runs the procedure's opening turn in the same session before the scored prompt lands, recording the procedure's name, version, and content hash. Suites never author crowding content (ruling S6); they attest domain disjointness in `crowding.collision_review`.

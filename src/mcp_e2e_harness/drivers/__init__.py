@@ -7,9 +7,11 @@ from __future__ import annotations
 
 from .base import Driver, DriverAttributionError, TurnSpec
 from .claude_code import ClaudeCodeDriver
+from .codex import CodexDriver
 
 DRIVERS: dict[str, Driver] = {
     ClaudeCodeDriver.id: ClaudeCodeDriver(),
+    CodexDriver.id: CodexDriver(),
 }
 
 __all__ = ["DRIVERS", "Driver", "DriverAttributionError", "TurnSpec"]
