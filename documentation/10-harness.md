@@ -47,6 +47,8 @@ Live consumer per run; no replay tier. Runs are minimal and manual: high-risk ch
 
 **Recorded per cell, per run:** manifest content hash; cell id and the full knob set; the complete tool-call trace; the consumer transcript; the recorded available-tool surface; setup actions performed; for crowded cells, the crowding procedure's name, version, and content hash; and a meta record (wall clock, tool-call count, and the upstream identifiers actually hit, so staleness of groundings is detectable after the fact rather than assumed away). The minimum trace-record fields are pinned in `30-checks.md`, since checks evaluate against them.
 
+**Operator legibility** (ruling S9). The runner is never silent: it reports progress to its controlling terminal as it works — which cell and prompt it is on, turn transitions within a cell (setup, pre-turn, scored turn), and per-cell completion with at least wall clock and trace-record count — and it names the run directory up front, so an operator who suspects trouble knows where the artifacts are before anything has gone wrong. Format is the implementation's; the requirement is that the three states an operator must distinguish — in-flight, hung, broken — are distinguishable from the terminal without digging. Grounded in the DR-1 incident: the runner emitted nothing, so a progressing run was read as hung, and a run that was in fact broken (dead SUT, priors-only answers) was diagnosed only when the operator escalated — the artifacts held everything needed, but nothing pointed at them.
+
 Run bytes land in a gitignored `runs/` directory — bytes are disposable; the scored findings are what gets committed, in the suite repo.
 
 ## Cells

@@ -107,6 +107,8 @@ Score from the artifacts, not from summaries — demand the trace, the before/af
 
 `mcp-e2e validate --manifest …` checks the manifest; `mcp-e2e run --manifest …` executes cells. Per cell/prompt the run directory holds: `trace.jsonl` (every tool call, verbatim), `answer.txt`, `meta.json` (knobs, manifest hash, timing, tool-call list, attribution record, api-surface digest, crowding hash), `available-tools.json` (advertised vs exposed), `api-surface.jsonl` (the actual tool arrays sent to the model), and the checks report.
 
+While a run is live, the runner reports progress to the terminal and artifacts land per cell as it goes — if anything looks wrong, read before killing: `proxy-meta.json` (did your server die? `server_exit` is the tell), `available-tools.json` (did its tools register?), and the cell's `meta.json` (`trace_records: 0` on a prompt that needs your server means the consumer answered from priors — instrument breach, not data).
+
 Gitignore the run directory — bytes are disposable. What you commit is the manifest, its grounding measurements, and your scored findings, each finding citing the run artifacts it was scored from. Commit each ruling as it is made; the git history is your decision record.
 
 ## Recommended starting grid
