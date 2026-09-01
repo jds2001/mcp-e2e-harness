@@ -61,6 +61,57 @@ def test_load_errors(mutate, fragment):
         validate_manifest(data)
 
 
+# DR-2 (documentation/90-open-questions.md): explicit null == absent for every
+# optional field. The first real suite's manifest was rejected for "watch": null --
+# the idiom the spec's own worked example uses throughout.
+@pytest.mark.parametrize("mutate", [
+    lambda d: d["prompts"][0].update(watch=None),
+    lambda d: d["prompts"][0].update(variants=None),
+    lambda d: d["prompts"][0].update(fixture=None),
+    lambda d: d["cells"]["basic"].update(crowding=None),
+    lambda d: d["cells"]["basic"].update(prompts=None),
+    lambda d: d["cells"]["basic"].update(variant=None),
+    lambda d: d["cells"]["basic"].update(setup=None),
+    lambda d: d["cells"]["basic"].update(env=None),
+    lambda d: d["cells"]["basic"].update(notes=None),
+    lambda d: d["server"].update(secret_keys=None),
+    lambda d: d["server"]["transport"].update(args=None),
+    lambda d: d["server"]["transport"].update(env=None),
+    lambda d: d.update(fixtures=None),
+    lambda d: d.update(rubrics=None),
+    lambda d: d.update(checks=None),
+])
+def test_dr2_explicit_null_equals_absent_for_optional_fields(mutate):
+    data = valid()
+    mutate(data)
+    validate_manifest(data)
+
+
+def test_dr2_null_rubric_is_absent_so_null_criteria_still_need_one():
+    data = valid()
+    data["prompts"][0]["pass"] = None
+    data["prompts"][0]["fail"] = None
+    data["prompts"][0]["rubric"] = None
+    with pytest.raises(ManifestError, match="rubric"):
+        validate_manifest(data)
+
+
+def test_dr2_crowded_cell_with_null_crowding_still_errors():
+    data = valid()
+    data["cells"]["basic"]["context"] = "crowded"
+    data["cells"]["basic"]["crowding"] = None
+    with pytest.raises(ManifestError, match="crowding"):
+        validate_manifest(data)
+
+
+def test_dr2_null_checks_load_as_no_checks(tmp_path):
+    data = valid()
+    data["checks"] = None
+    manifest = load_manifest(write_manifest(tmp_path, data))
+    assert manifest.checks == []
+    assert manifest.fixtures == {}
+
+
 def test_unknown_prompt_key_is_a_load_error():
     data = valid()
     data["prompts"][0]["single_step_variant"] = "old ancestor field"

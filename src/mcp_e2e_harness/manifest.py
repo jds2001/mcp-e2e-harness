@@ -42,6 +42,19 @@ def _obj(value: Any, path: str) -> dict:
     return value
 
 
+def _given(obj: dict, key: str) -> bool:
+    """Whether an OPTIONAL field is actually provided.
+
+    DR-2 (documentation/90-open-questions.md, 20-manifest.md nullability): for every
+    optional field an explicit ``null`` is equivalent to omitting it -- the worked
+    example carries ``"watch": null`` throughout, and the first real suite's manifest
+    was rejected for it. The one place null carries meaning of its own is
+    ``pass``/``fail`` (required-but-nullable: null there means rubric-scored), which
+    never goes through this helper.
+    """
+    return obj.get(key) is not None
+
+
 def _check_keys(obj: dict, path: str, required: tuple[str, ...], optional: tuple[str, ...] = ()) -> None:
     for key in required:
         if key not in obj:
@@ -87,21 +100,21 @@ def _validate_server(server: Any) -> None:
     server = _obj(server, "server")
     _check_keys(server, "server", ("name", "transport"), ("secret_keys",))
     _string(server, "name", "server")
-    secret_keys = set(_string_list(server.get("secret_keys", []), "server.secret_keys", nonempty=False)
-                      if "secret_keys" in server else [])
+    secret_keys = set(_string_list(server["secret_keys"], "server.secret_keys", nonempty=False)
+                      if _given(server, "secret_keys") else [])
     transport = _obj(server["transport"], "server.transport")
     ttype = transport.get("type")
     if ttype == "stdio":
         _check_keys(transport, "server.transport", ("type", "command"), ("args", "env"))
         _string(transport, "command", "server.transport")
-        if "args" in transport:
+        if _given(transport, "args"):
             _string_list(transport["args"], "server.transport.args", nonempty=False)
-        if "env" in transport:
+        if _given(transport, "env"):
             _validate_env_map(transport["env"], "server.transport.env", secret_keys)
     elif ttype == "http":
         _check_keys(transport, "server.transport", ("type", "url"), ("headers",))
         _string(transport, "url", "server.transport")
-        if "headers" in transport:
+        if _given(transport, "headers"):
             _validate_env_map(transport["headers"], "server.transport.headers", secret_keys)
     else:
         _fail("server.transport.type", f"must be 'stdio' or 'http', got {ttype!r}")
@@ -131,7 +144,7 @@ def _validate_cell(name: str, cell: Any, secret_keys: set[str], server_name: str
     if context not in CONTEXT_VALUES:
         _fail(f"{path}.context", f"must be one of {CONTEXT_VALUES}, got {context!r}")
     if context == "crowded":
-        if "crowding" not in cell:
+        if not _given(cell, "crowding"):
             _fail(path, "context 'crowded' requires a crowding block {procedure, collision_review}")
         cr = _obj(cell["crowding"], f"{path}.crowding")
         _check_keys(cr, f"{path}.crowding", ("procedure", "collision_review"))
@@ -147,7 +160,7 @@ def _validate_cell(name: str, cell: Any, secret_keys: set[str], server_name: str
             _fail(f"{path}.crowding.procedure",
                   f"the procedure's distractor server name {proc.server_name!r} collides with the "
                   "server under test; the crowding surface would be indistinguishable from the SUT")
-    elif "crowding" in cell:
+    elif _given(cell, "crowding"):
         _fail(path, "crowding is only meaningful when context is 'crowded' -- "
                     "a fresh cell that names a procedure is a config that means two things")
     surface = cell["tool_surface"]
@@ -156,15 +169,15 @@ def _validate_cell(name: str, cell: Any, secret_keys: set[str], server_name: str
     if not isinstance(cell["merge_gating"], bool):
         _fail(f"{path}.merge_gating", "must be a boolean")
     _string_list(cell["groups"], f"{path}.groups")
-    if "prompts" in cell:
+    if _given(cell, "prompts"):
         _string_list(cell["prompts"], f"{path}.prompts")
-    if "variant" in cell:
+    if _given(cell, "variant"):
         _string(cell, "variant", path)
-    if "setup" in cell:
+    if _given(cell, "setup"):
         _validate_setup(cell["setup"], f"{path}.setup")
-    if "env" in cell:
+    if _given(cell, "env"):
         _validate_env_map(cell["env"], f"{path}.env", secret_keys)
-    if "notes" in cell and not isinstance(cell["notes"], str):
+    if _given(cell, "notes") and not isinstance(cell["notes"], str):
         _fail(f"{path}.notes", "must be a string")
 
 
@@ -191,22 +204,22 @@ def _validate_prompt(i: int, entry: Any, fixtures: dict, rubrics: dict) -> str:
             _fail(f"{path}.{key}", "must be a non-empty string or null")
     if (passes is None) != (fails is None):
         _fail(path, "pass and fail must be pinned together: both criteria, or both null with a rubric")
-    if passes is None and "rubric" not in entry:
+    if passes is None and not _given(entry, "rubric"):
         _fail(path, "null pass/fail requires 'rubric' naming an entry in rubrics")
-    if "rubric" in entry:
+    if _given(entry, "rubric"):
         rubric = _string(entry, "rubric", path)
         if rubric not in rubrics:
             _fail(f"{path}.rubric", f"{rubric!r} is not defined in rubrics")
-    if "variants" in entry:
+    if _given(entry, "variants"):
         variants = _obj(entry["variants"], f"{path}.variants")
         for vname, vtext in variants.items():
             if not isinstance(vtext, str) or not vtext:
                 _fail(f"{path}.variants.{vname}", "variant text must be a non-empty string")
-    if "fixture" in entry and entry["fixture"] is not None:
+    if _given(entry, "fixture"):
         fixture = _string(entry, "fixture", path)
         if fixture not in fixtures:
             _fail(f"{path}.fixture", f"{fixture!r} is not defined in fixtures")
-    if "watch" in entry and not isinstance(entry["watch"], str):
+    if _given(entry, "watch") and not isinstance(entry["watch"], str):
         _fail(f"{path}.watch", "must be a string")
     return pid
 
@@ -226,13 +239,13 @@ def validate_manifest(data: Any) -> None:
     server_name = server["name"]
     secret_keys = set(server.get("secret_keys") or [])
 
-    fixtures = _obj(data.get("fixtures", {}), "fixtures")
+    fixtures = _obj(data["fixtures"], "fixtures") if _given(data, "fixtures") else {}
     for fname, fixture in fixtures.items():
         fixture = _obj(fixture, f"fixtures.{fname}")
-        if "content_hash" in fixture and not isinstance(fixture["content_hash"], str):
+        if _given(fixture, "content_hash") and not isinstance(fixture["content_hash"], str):
             _fail(f"fixtures.{fname}.content_hash", "must be a string")
 
-    rubrics = _obj(data.get("rubrics", {}), "rubrics")
+    rubrics = _obj(data["rubrics"], "rubrics") if _given(data, "rubrics") else {}
 
     cells = _obj(data["cells"], "cells")
     if not cells:
@@ -250,7 +263,7 @@ def validate_manifest(data: Any) -> None:
             _fail(f"prompts[{i}]", f"duplicate id {pid!r} (also prompts[{seen[pid]}])")
         seen[pid] = i
 
-    checks = data.get("checks", [])
+    checks = data["checks"] if _given(data, "checks") else []
     if not isinstance(checks, list):
         _fail("checks", "must be a list of check objects (schema in documentation/30-checks.md)")
     check_ids: set[str] = set()
@@ -314,11 +327,11 @@ class Manifest:
 
     @property
     def checks(self) -> list[dict]:
-        return self.data.get("checks", [])
+        return self.data.get("checks") or []
 
     @property
     def fixtures(self) -> dict:
-        return self.data.get("fixtures", {})
+        return self.data.get("fixtures") or {}
 
     def prompt_by_id(self, pid: str) -> dict | None:
         return next((p for p in self.prompts if p["id"] == pid), None)
