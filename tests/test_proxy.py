@@ -139,3 +139,31 @@ def test_missing_secret_kills_the_proxy_loudly(tmp_path):
     with pytest.raises(MCPClientError, match="DEFINITELY_UNSET_VAR"):
         client.start()
     client.close()
+
+
+def secrets_client(tmp_path, mode: int) -> StdioMCPClient:
+    secrets = tmp_path / "secrets.env"
+    secrets.write_text("FILE_ONLY_VAR=value-from-file\n")
+    secrets.chmod(mode)
+    client = proxy_client(tmp_path, server_env={"KEY": {"$secret": "FILE_ONLY_VAR"}})
+    client._cmd += ["--secrets-file", str(secrets)]
+    return client
+
+
+def test_secrets_file_resolves_vars_absent_from_the_environment(tmp_path):
+    # 50-drivers.md codex #6: the driver sanitizes spawned-server env, so the value
+    # arrives by file. FILE_ONLY_VAR is set nowhere in this process's environment.
+    with secrets_client(tmp_path, 0o600) as c:
+        c.list_tools()
+        record = c.call_tool("list_unfiled_notes", {})
+        assert record["is_error"] is False
+    # The value reaches no proxy artifact.
+    for artifact in ("trace.jsonl", "proxy-meta.json", "available-tools.json"):
+        assert "value-from-file" not in (tmp_path / artifact).read_text()
+
+
+def test_group_readable_secrets_file_is_refused(tmp_path):
+    client = secrets_client(tmp_path, 0o644)
+    with pytest.raises(MCPClientError, match="refusing"):
+        client.start()
+    client.close()

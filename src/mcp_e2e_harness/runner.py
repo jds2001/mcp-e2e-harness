@@ -41,7 +41,7 @@ from .drivers import DRIVERS, Driver
 from .drivers.base import TurnContext
 from .manifest import Manifest
 from .mcp_client import MCPClientError, StdioMCPClient
-from .secrets import assert_clean, collect_scan_set, resolve_env_map
+from .secrets import assert_clean, collect_scan_set, is_secret_ref, resolve_env_map
 
 DEFAULT_TIMEOUT_S = 900
 CONTEXT_LEAK_MARKERS = (".git", "CLAUDE.md", "AGENTS.md")
@@ -186,7 +186,8 @@ def _write_server_config(dest: Path, manifest: Manifest, cell: dict) -> Path:
     return path
 
 
-def _proxy_entry(server_config: Path, dest: Path, prefix: str, cell: dict) -> dict:
+def _proxy_entry(server_config: Path, dest: Path, prefix: str, cell: dict,
+                 secrets_file: Path | None = None) -> dict:
     args = ["-m", "mcp_e2e_harness.proxy",
             "--server-config", str(server_config),
             "--trace-file", str(dest / f"{prefix}trace.jsonl"),
@@ -194,7 +195,38 @@ def _proxy_entry(server_config: Path, dest: Path, prefix: str, cell: dict) -> di
             "--meta-file", str(dest / f"{prefix}proxy-meta.json")]
     if cell["tool_surface"] != "full":
         args += ["--allow-tools", ",".join(cell["tool_surface"])]
+    if secrets_file is not None:
+        args += ["--secrets-file", str(secrets_file)]
     return {"command": sys.executable, "args": args}
+
+
+def _write_secrets_file(env_spec: dict, run_dir: Path) -> Path | None:
+    """Transient 0600 KEY=VALUE file carrying the $secret values the proxy needs.
+
+    For drivers that sanitize the environment of MCP servers they spawn (codex,
+    50-drivers.md #6): inheritance delivers nothing there, and every channel the
+    driver does offer is an artifact, so the values travel by a file OUTSIDE the run
+    tree (the run directory is exactly what an operator tars up and attaches to an
+    issue), created 0600 by mkstemp, and deleted when the invocation ends. Only the
+    file's path appears in the generated config. None when the spec names no secrets.
+    """
+    names = sorted({value["$secret"] for value in env_spec.values() if is_secret_ref(value)})
+    values = {name: os.environ.get(name, "") for name in names}
+    values = {k: v for k, v in values.items() if v}
+    if not values:
+        return None
+    fd, raw_path = tempfile.mkstemp(prefix="mcpe2e-secrets-", suffix=".env")
+    path = Path(raw_path).resolve()
+    if path == run_dir.resolve() or run_dir.resolve() in path.parents:
+        os.close(fd)
+        path.unlink(missing_ok=True)
+        raise HarnessError(
+            f"secrets file would land inside the run tree {run_dir}; it must live outside "
+            "every artifact directory. Set TMPDIR elsewhere.")
+    with os.fdopen(fd, "w") as handle:
+        for name, value in values.items():
+            handle.write(f"{name}={value}\n")
+    return path
 
 
 def _distractor_entry(procedure: crowding.CrowdingProcedure, dest: Path) -> dict:
@@ -253,13 +285,14 @@ def _write_scanned(path: Path, text: str, scan: list[str]) -> None:
 
 def _crowding_preturn(driver: Driver, ctx_base: dict, procedure: crowding.CrowdingProcedure,
                       dest: Path, cwd: Path, timeout_s: int, scan: list[str],
-                      session_id: str, crowd_config: Path,
-                      env: dict[str, str] | None = None) -> dict:
+                      session_id: str, crowd_config: Path) -> dict:
     """Run the crowding procedure's opening turn so the scored prompt lands mid-task."""
     ctx = TurnContext(**ctx_base, mcp_config_path=crowd_config,
                       session=("open", session_id), prompt=procedure.opening_prompt)
     turn = driver.build_turn(ctx)
-    driver.attribution_record(turn.argv)
+    driver.attribution_record(turn)
+    env = dict(os.environ)
+    env.update(turn.env_overrides)
     proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text, env=env,
                           capture_output=True, text=True, timeout=timeout_s)
     record = {
@@ -296,7 +329,15 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     crowded = cell["context"] == "crowded"
     procedure = crowding.get_procedure(cell["crowding"]["procedure"]) if crowded else None
 
-    entries = {manifest.server["name"]: _proxy_entry(server_config, dest, "", cell)}
+    # Drivers that sanitize spawned-MCP-server environments (codex) get the manifest's
+    # $secret values to the proxy via a transient 0600 file outside the run tree --
+    # process-env only, never an artifact (50-drivers.md, codex #6).
+    secrets_file: Path | None = None
+    if driver.sanitizes_mcp_env and not config.dry_run:
+        secrets_file = _write_secrets_file(_server_env_spec(manifest, cell), config.run_dir)
+
+    entries = {manifest.server["name"]: _proxy_entry(server_config, dest, "", cell,
+                                                     secrets_file=secrets_file)}
     extra_names: tuple[str, ...] = ()
     if procedure is not None:
         entries[procedure.server_name] = _distractor_entry(procedure, dest)
@@ -304,9 +345,24 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     driver_config = driver.write_driver_config(dest, entries)
     assert_clean(driver_config.read_text(), scan, str(driver_config))
 
+    # API-boundary tool-surface capture (Q2's preferred instrument): the driver's
+    # outbound API traffic is routed through a local recording proxy for the whole
+    # invocation (pre-turn included), so the tools array actually sent to the model is
+    # an observation off the wire, recorded during the scored turn with zero
+    # disclosure -- never a model claim. Started before the turn is built: drivers
+    # route to it in their own idiom (claude via env var, codex via the custom
+    # provider's base_url), so the URL is part of the turn's construction.
+    recorder = None
+    api_base_url: str | None = None
+    if driver.supports_api_capture and not config.dry_run:
+        upstream = ((os.environ.get(driver.api_base_env) if driver.api_base_env else None)
+                    or driver.api_default_upstream)
+        recorder = ApiSurfaceRecorder(dest / "api-surface.jsonl", upstream)
+        api_base_url = recorder.start()
+
     ctx_base = dict(model=cell["model"], knobs=cell["knobs"],
                     server_name=manifest.server["name"], tool_surface=cell["tool_surface"],
-                    extra_server_names=extra_names, dest=dest)
+                    extra_server_names=extra_names, dest=dest, api_base_url=api_base_url)
 
     started = _utcnow()
     t0 = time.perf_counter()
@@ -314,6 +370,8 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     exit_status = -1
     answer = ""
     stderr_text = ""
+    stdout_text = ""
+    web_activity: list[str] = []
     setup_records: list[dict] = []
     crowding_record: dict | None = None
     session = ("single", "")
@@ -322,7 +380,8 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     if crowded:
         session_id = str(uuid.uuid4())
         crowd_entries = dict(entries)
-        crowd_entries[manifest.server["name"]] = _proxy_entry(server_config, dest, "crowding-", cell)
+        crowd_entries[manifest.server["name"]] = _proxy_entry(server_config, dest, "crowding-", cell,
+                                                              secrets_file=secrets_file)
         crowd_config = driver.write_driver_config(dest, crowd_entries)
         # Both turns of a crowded invocation share one config file name per driver, so
         # give the pre-turn config its own path.
@@ -332,21 +391,11 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     scored_ctx = TurnContext(**ctx_base, mcp_config_path=driver_config,
                              session=session, prompt=prompt_text)
     turn = driver.build_turn(scored_ctx)
-    attribution = driver.attribution_record(turn.argv)
+    attribution = driver.attribution_record(turn)
     assert_clean("\n".join(turn.argv), scan, "runner argv")
-
-    # API-boundary tool-surface capture (Q2's preferred instrument): the driver's
-    # outbound API traffic is routed through a local recording proxy for the whole
-    # invocation (pre-turn included), so the tools array actually sent to the model is
-    # an observation off the wire, recorded during the scored turn with zero
-    # disclosure -- never a model claim.
-    recorder = None
-    turn_env: dict[str, str] | None = None
-    if driver.api_base_env and not config.dry_run:
-        upstream = os.environ.get(driver.api_base_env) or driver.api_default_upstream
-        recorder = ApiSurfaceRecorder(dest / "api-surface.jsonl", upstream)
-        turn_env = dict(os.environ)
-        turn_env[driver.api_base_env] = recorder.start()
+    assert_clean(json.dumps(turn.env_overrides), scan, "turn env overrides")
+    turn_env = dict(os.environ)
+    turn_env.update(turn.env_overrides)
 
     if config.dry_run:
         exit_status, answer = 0, "[dry-run: no model was called]"
@@ -359,12 +408,13 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
                 config.log(f"     crowding pre-turn: {procedure.full_name}")
                 crowding_record = _crowding_preturn(
                     driver, ctx_base, procedure, dest, cwd, config.timeout_s, scan,
-                    session_id, dest / "mcp-config-crowding.json", env=turn_env)
+                    session_id, dest / "mcp-config-crowding.json")
             config.log(f"     scored turn: {cell['driver']} {cell['model']}")
             proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text, env=turn_env,
                                   capture_output=True, text=True, timeout=config.timeout_s)
             exit_status = proc.returncode
             stderr_text = proc.stderr
+            stdout_text = proc.stdout
             if turn.answer_from == "stdout":
                 answer = proc.stdout
             elif turn.answer_path and turn.answer_path.exists():
@@ -388,8 +438,28 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         finally:
             if recorder is not None:
                 recorder.stop()
+            if secrets_file is not None:
+                secrets_file.unlink(missing_ok=True)
         _write_scanned(dest / "runner-stderr.txt", stderr_text, scan)
         _write_scanned(dest / "answer.txt", answer, scan)
+        if turn.answer_from != "stdout":
+            # The driver's stdout is its event stream (not the answer): keep it -- it
+            # is where codex reports MCP startup failures and web-tool events.
+            _write_scanned(dest / "runner-stdout.txt", stdout_text, scan)
+
+    # Effect-level web-activity scan over the driver's EVENT streams (never answer
+    # content -- an answer saying "I cannot search the web" must not read as web
+    # activity): stderr always, stdout only when the answer travels by file. Any hit
+    # is an instrument breach (50-drivers.md, codex #5).
+    if driver.web_event_markers and not config.dry_run:
+        streams = [stderr_text] + ([stdout_text] if turn.answer_from != "stdout" else [])
+        lowered = [s.casefold() for s in streams]
+        web_activity = [m for m in driver.web_event_markers
+                        if any(m in s for s in lowered)]
+        if web_activity and harness_failure is None:
+            harness_failure = (f"web-tool activity suspected in the driver's event streams "
+                               f"({','.join(web_activity)}) -- instrument breach; claims not "
+                               "tool-attributable")
 
     api_surface: dict | None = None
     if recorder is not None:
@@ -457,7 +527,13 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         # Wire-level observation of the tools array sent to the model (Q2's preferred
         # instrument); null when the driver does not support capture or on a dry run.
         "api_surface": api_surface,
+        # Web-tool markers found in the driver's own event streams; non-empty means
+        # the row's claims are not tool-attributable (instrument breach).
+        "web_activity_suspected": web_activity,
         "attribution": attribution,
+        # Executed environment material the runner applied for this turn (e.g. the
+        # isolated CODEX_HOME, the recorder URL). Never carries secret values.
+        "env_overrides": turn.env_overrides,
         "setup": setup_records,
         "crowding": ({"procedure": procedure.name, "version": procedure.version,
                       "content_hash": procedure.content_hash(),
@@ -639,7 +715,9 @@ def probe_builtin_surface(driver: Driver, dest: Path, *, model: str | None = Non
                       server_name=PROBE_SERVER_NAME, tool_surface="full",
                       prompt=PROBE_PROMPT, dest=dest)
     turn = driver.build_turn(ctx)
-    attribution = driver.attribution_record(turn.argv)
+    attribution = driver.attribution_record(turn)
+    probe_env = dict(os.environ)
+    probe_env.update(turn.env_overrides)
 
     started = _utcnow()
     answer = ""
@@ -647,7 +725,7 @@ def probe_builtin_surface(driver: Driver, dest: Path, *, model: str | None = Non
     exit_status = -1
     detail: str | None = None
     try:
-        proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text,
+        proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text, env=probe_env,
                               capture_output=True, text=True, timeout=timeout_s)
         exit_status = proc.returncode
         stderr_text = proc.stderr
@@ -722,16 +800,29 @@ def preflight(config: RunConfig) -> None:
                 f"cell {cell_name!r} names driver {driver_id!r}, which this harness does not "
                 f"provide (available: {sorted(config.drivers)}). The roster of supported "
                 "drivers is an implementation property; the cell is refused, not skipped.")
+        driver = config.drivers[driver_id]
+        if manifest.cells[cell_name]["context"] == "crowded" and not driver.supports_sessions:
+            raise HarnessError(
+                f"cell {cell_name!r} is crowded but driver {driver_id!r} does not support "
+                "sessions; a crowding pre-turn that cannot verifiably resume would mislabel "
+                "a fresh cell as crowded. The cell is refused, not degraded.")
     if config.prompts:
         known = {p["id"] for p in manifest.prompts}
         missing = sorted(config.prompts - known)
         if missing:
             raise HarnessError(f"--prompts names unknown id(s) {missing}")
     if not config.dry_run:
-        for driver_id in {manifest.cells[c]["driver"] for c in config.cells}:
-            executable = config.drivers[driver_id].executable
-            if shutil.which(executable) is None:
-                raise HarnessError(f"driver {driver_id!r} executable {executable!r} not on PATH")
+        for driver_id in sorted({manifest.cells[c]["driver"] for c in config.cells}):
+            driver = config.drivers[driver_id]
+            if shutil.which(driver.executable) is None:
+                raise HarnessError(f"driver {driver_id!r} executable {driver.executable!r} not on PATH")
+            missing_env = [name for name in driver.required_env
+                           if not os.environ.get(name, "").strip()]
+            if missing_env:
+                raise HarnessError(
+                    f"driver {driver_id!r} requires env var(s) {missing_env} and none was found. "
+                    "The value reaches the driver by process env only -- export it in the shell "
+                    "that runs the harness; it appears in no artifact.")
         # Resolve every $secret now, so a missing export fails once, loudly, before
         # anything is spent -- not as N consumer failures that are really one unset var.
         resolve_env_map(transport.get("env") or {}, where="server.transport.env")
@@ -783,9 +874,10 @@ def run(config: RunConfig) -> RunResult:
     scan = collect_scan_set(manifest.data)
     driver_probes: dict[str, dict] = {}
     if not config.dry_run:
-        gating_drivers = sorted({manifest.cells[c]["driver"] for c in config.cells
-                                 if manifest.cells[c]["merge_gating"]
-                                 and not config.drivers[manifest.cells[c]["driver"]].api_base_env})
+        gating_drivers = sorted({
+            manifest.cells[c]["driver"] for c in config.cells
+            if manifest.cells[c]["merge_gating"]
+            and not config.drivers[manifest.cells[c]["driver"]].supports_api_capture})
         for driver_id in gating_drivers:
             record = probe_builtin_surface(
                 config.drivers[driver_id], config.run_dir / "driver-probe" / driver_id,
@@ -833,7 +925,7 @@ def run(config: RunConfig) -> RunResult:
                 log(f"  {len(cell_planned)} prompt(s) skipped without spending model turns; "
                     f"evidence: {config.run_dir / cell_name / 'spawn-check.json'}")
                 continue
-        for item in cell_planned:
+        for index, item in enumerate(cell_planned):
             entry = item.entry
             log(f"  -> {cell_name}/{entry['id']}"
                 + ("  [outside cell groups]" if item.outside_cell_groups else ""))
@@ -846,6 +938,25 @@ def run(config: RunConfig) -> RunResult:
             log(f"     {entry['id']:6s} {meta['duration_s']:6.1f}s  "
                 f"{meta['trace_records']:>3} trace record(s)  "
                 f"{meta['answer_chars']:>6} chars{flag}")
+            # Attribution breach (a disallowed builtin on the wire, or web-tool
+            # activity in the driver's event streams): the row is not
+            # tool-attributable and the CELL is BROKEN -- refusal is hard, not
+            # best-effort (50-drivers.md #5; the measured failure class includes a
+            # web tool fabricating a fetch result presented as retrieved).
+            breach = list(meta.get("web_activity_suspected") or [])
+            breach += (meta.get("api_surface") or {}).get("disallowed_builtins_on_wire") or []
+            if breach:
+                reason = (f"attribution breach in {entry['id']}: {sorted(set(breach))} -- "
+                          "the channel the configuration claims closed is open; no row of "
+                          "this cell is tool-attributable.")
+                write_cell_void(config.run_dir, cell_name, reason)
+                voided[cell_name] = reason
+                remaining = len(cell_planned) - index - 1
+                log(f"cell {cell_name}: BROKEN -- {reason}")
+                if remaining:
+                    log(f"  {remaining} remaining prompt(s) skipped without spending "
+                        "model turns.")
+                break
 
     dead = zero_trace_cells(results, config.dry_run)
     failures += len(dead)

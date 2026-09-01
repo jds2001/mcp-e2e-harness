@@ -48,6 +48,25 @@ def test_records_tool_names_and_forwards_verbatim(tmp_path, fake_api_upstream):
     assert "input_schema" not in raw
 
 
+def test_type_named_hosted_tools_are_recorded(tmp_path, fake_api_upstream):
+    # Responses-API hosted tools (web_search and kin) carry a "type" and no "name";
+    # recording only names would blind the disallowed check to exactly these.
+    recorder = ApiSurfaceRecorder(tmp_path / "cap.jsonl", fake_api_upstream)
+    base = recorder.start()
+    try:
+        post(base, "/v1/responses", {
+            "model": "gpt-x",
+            "tools": [{"type": "web_search"}, {"type": "function", "name": "shell"}],
+            "input": [],
+        })
+    finally:
+        recorder.stop()
+    record = json.loads((tmp_path / "cap.jsonl").read_text().splitlines()[0])
+    assert record["tool_names"] == ["web_search", "shell"]
+    digest = summarize(tmp_path / "cap.jsonl", ("web_search", "web_search_preview"))
+    assert digest["disallowed_builtins_on_wire"] == ["web_search"]
+
+
 def test_requests_without_tools_forward_but_are_not_recorded(tmp_path, fake_api_upstream):
     recorder = ApiSurfaceRecorder(tmp_path / "cap.jsonl", fake_api_upstream)
     base = recorder.start()

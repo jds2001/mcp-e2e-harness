@@ -43,9 +43,10 @@ class FakeDriver(Driver):
 
     def build_turn(self, ctx: TurnContext) -> TurnSpec:
         argv = [sys.executable, str(FAKE_CONSUMER), str(ctx.mcp_config_path)]
-        return TurnSpec(argv=argv, stdin_text=ctx.prompt)
+        env_overrides = ({"FAKE_API_BASE": ctx.api_base_url} if ctx.api_base_url else {})
+        return TurnSpec(argv=argv, stdin_text=ctx.prompt, env_overrides=env_overrides)
 
-    def attribution_record(self, argv: list[str]) -> dict:
+    def attribution_record(self, turn: TurnSpec) -> dict:
         return {"fake": True}
 
 

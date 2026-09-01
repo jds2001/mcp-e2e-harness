@@ -273,7 +273,10 @@ def capture_drivers() -> dict:
     from conftest import FakeDriver
 
     class CapturingFakeDriver(FakeDriver):
+        # The harness env var FAKE_API_BASE (set by the test) overrides the default
+        # upstream; the non-empty default is what marks the driver capture-capable.
         api_base_env = "FAKE_API_BASE"
+        api_default_upstream = "http://upstream-not-configured.invalid"
 
     return {"fake": CapturingFakeDriver()}
 
@@ -319,6 +322,133 @@ def test_unrouted_capture_reads_as_unverified_never_as_clean(
     meta = result.results[0]
     assert meta["api_surface"]["requests_with_tools"] == 0
     assert "unverified" in meta["harness_failure"]
+
+
+# ---------------------------- codex-shaped driver mechanics, exercised via the fake
+
+def two_prompt_data() -> dict:
+    data = manifest_data()
+    data["prompts"].append({"id": "A2", "group": "A", "title": "t2",
+                            "prompt": "Please list the unfiled notes.", "sourcing": "derived",
+                            "pass": "p", "fail": "f"})
+    return data
+
+
+def test_web_event_breach_breaks_the_cell_hard(tmp_path, fake_drivers, monkeypatch):
+    # 50-drivers.md codex #5: a web event in the driver's own stream is an instrument
+    # breach -- the row is not tool-attributable and the CELL is BROKEN, remaining
+    # prompts skipped. The measured failure class includes a fabricated fetch result.
+    from conftest import FakeDriver
+
+    class WebEventFakeDriver(FakeDriver):
+        web_event_markers = ("fake web event",)
+
+    monkeypatch.setenv("FAKE_WEB_EVENT", "1")
+    config = config_for(tmp_path, two_prompt_data(), {"fake": WebEventFakeDriver()})
+    result = run(config)
+    assert len(result.results) == 1  # A2 skipped after A1's breach
+    meta = result.results[0]
+    assert meta["web_activity_suspected"] == ["fake web event"]
+    assert "not tool-attributable" in meta["harness_failure"]
+    assert "basic" in result.voided_cells
+    void = json.loads((config.run_dir / "basic" / "CELL-VOID.json").read_text())
+    assert "attribution breach" in void["reason"]
+
+
+def test_answer_can_travel_by_file_with_stdout_kept_as_event_stream(tmp_path, fake_drivers):
+    from conftest import FAKE_CONSUMER, FakeDriver
+
+    from mcp_e2e_harness.drivers.base import TurnSpec
+
+    class FileAnswerFakeDriver(FakeDriver):
+        def build_turn(self, ctx):
+            answer_path = ctx.dest / "fake-answer.txt"
+            argv = [FakeDriver.executable, str(FAKE_CONSUMER), str(ctx.mcp_config_path)]
+            return TurnSpec(argv=argv, stdin_text=ctx.prompt, answer_from="file",
+                            answer_path=answer_path,
+                            env_overrides={"FAKE_ANSWER_FILE": str(answer_path)})
+
+    data = manifest_data()
+    data["cells"]["basic"]["merge_gating"] = False  # this fake's probe answer is file-bound
+    config = config_for(tmp_path, data, {"fake": FileAnswerFakeDriver()})
+    result = run(config)
+    assert result.failures == 0
+    dest = config.run_dir / "basic" / "A" / "A1"
+    assert "list_unfiled_notes returned" in (dest / "answer.txt").read_text()
+    # The driver's stdout (its event stream) is kept as its own artifact.
+    assert "turn complete" in (dest / "runner-stdout.txt").read_text()
+    meta = result.results[0]
+    assert meta["env_overrides"]["FAKE_ANSWER_FILE"].endswith("fake-answer.txt")
+
+
+def test_sanitizing_driver_gets_secrets_to_the_proxy_by_file_never_artifact(
+        tmp_path, fake_drivers, monkeypatch):
+    # 50-drivers.md codex #6: the driver strips the env of MCP servers it spawns, so
+    # $secret resolution must ride the transient 0600 file. FAKE_SANITIZE_VARS makes
+    # the fake consumer strip the var exactly as codex would.
+    monkeypatch.setenv("INJECTED_SECRET_VAR", "sekrit-injection-value")
+    monkeypatch.setenv("FAKE_SANITIZE_VARS", "INJECTED_SECRET_VAR")
+    from conftest import FakeDriver
+
+    class SanitizingFakeDriver(FakeDriver):
+        sanitizes_mcp_env = True
+
+    data = manifest_data()
+    data["server"]["secret_keys"] = ["INJECTED_SECRET_VAR"]
+    data["server"]["transport"]["env"] = {"INJECTED": {"$secret": "INJECTED_SECRET_VAR"}}
+    config = config_for(tmp_path, data, {"fake": SanitizingFakeDriver()})
+    result = run(config)
+    assert result.failures == 0
+    assert result.results[0]["trace_records"] >= 1  # the server came up WITH the secret
+    mcp_config = (config.run_dir / "basic" / "A" / "A1" / "mcp-config.json").read_text()
+    assert "--secrets-file" in mcp_config
+    secrets_path = Path(json.loads(mcp_config)["mcpServers"]["notes_sut"]["args"][-1])
+    assert not secrets_path.exists()  # deleted when the invocation ended
+    assert str(config.run_dir.resolve()) not in str(secrets_path)
+    # The value itself reached no artifact (the hygiene scan would have halted; check
+    # the config bytes directly as well).
+    assert "sekrit-injection-value" not in mcp_config
+
+
+def test_without_the_secrets_file_the_sanitized_proxy_dies(tmp_path, fake_drivers, monkeypatch):
+    # Control arm: same sanitized env, driver NOT declaring sanitizes_mcp_env -- the
+    # proxy relies on inheritance, the fake consumer strips the var, and the secret
+    # never arrives. Proves the file (not ambient env) delivered the secret above.
+    monkeypatch.setenv("INJECTED_SECRET_VAR", "sekrit-injection-value")
+    monkeypatch.setenv("FAKE_SANITIZE_VARS", "INJECTED_SECRET_VAR")
+    data = manifest_data()
+    data["server"]["secret_keys"] = ["INJECTED_SECRET_VAR"]
+    data["server"]["transport"]["env"] = {"INJECTED": {"$secret": "INJECTED_SECRET_VAR"}}
+    config = config_for(tmp_path, data, fake_drivers)
+    result = run(config)
+    assert result.failures >= 1
+
+
+def test_crowded_cell_on_sessionless_driver_is_refused_at_preflight(tmp_path, fake_drivers):
+    from conftest import FakeDriver
+
+    class SessionlessFakeDriver(FakeDriver):
+        supports_sessions = False
+
+    data = manifest_data()
+    data["cells"]["basic"]["context"] = "crowded"
+    data["cells"]["basic"]["crowding"] = {"procedure": "neutral-file-triage@2",
+                                          "collision_review": "dated attestation"}
+    config = config_for(tmp_path, data, {"fake": SessionlessFakeDriver()})
+    with pytest.raises(HarnessError, match="sessions"):
+        run(config)
+
+
+def test_missing_required_env_is_refused_at_preflight(tmp_path, fake_drivers, monkeypatch):
+    from conftest import FakeDriver
+
+    class KeyedFakeDriver(FakeDriver):
+        required_env = ("UNSET_PROVIDER_KEY_VAR",)
+
+    monkeypatch.delenv("UNSET_PROVIDER_KEY_VAR", raising=False)
+    config = config_for(tmp_path, manifest_data(), {"fake": KeyedFakeDriver()})
+    with pytest.raises(HarnessError, match="UNSET_PROVIDER_KEY_VAR"):
+        run(config)
 
 
 # ------------------------------- builtin-surface calibration probe (Q2 fallback gate)

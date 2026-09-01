@@ -59,26 +59,39 @@ def test_session_flags(tmp_path):
     assert "--session-id" not in single and "--resume" not in single
 
 
-def test_attribution_record_is_asserted_from_argv(tmp_path):
+def test_attribution_record_is_asserted_from_the_executed_turn(tmp_path):
+    from mcp_e2e_harness.drivers.base import TurnSpec
+
     driver = ClaudeCodeDriver()
     turn = driver.build_turn(ctx(tmp_path))
-    record = driver.attribution_record(turn.argv)
+    record = driver.attribution_record(turn)
     assert record["strict_mcp_config"] is True
     assert "WebSearch" in record["disallowed_tools"]
 
+    def tampered(argv: list[str]) -> TurnSpec:
+        return TurnSpec(argv=argv, stdin_text="")
+
     with pytest.raises(DriverAttributionError, match="strict-mcp-config"):
-        driver.attribution_record([a for a in turn.argv if a != "--strict-mcp-config"])
+        driver.attribution_record(tampered([a for a in turn.argv if a != "--strict-mcp-config"]))
 
     open_web = list(turn.argv)
     i = open_web.index("--disallowed-tools")
     open_web[i + 1] = "Bash,Read"
     with pytest.raises(DriverAttributionError, match="WebSearch"):
-        driver.attribution_record(open_web)
+        driver.attribution_record(tampered(open_web))
 
     nonempty_builtins = list(turn.argv)
     nonempty_builtins[nonempty_builtins.index("--tools") + 1] = "default"
     with pytest.raises(DriverAttributionError, match="empty built-in set"):
-        driver.attribution_record(nonempty_builtins)
+        driver.attribution_record(tampered(nonempty_builtins))
+
+
+def test_recorder_url_travels_by_env_override(tmp_path):
+    driver = ClaudeCodeDriver()
+    routed = driver.build_turn(ctx(tmp_path, api_base_url="http://127.0.0.1:5555"))
+    assert routed.env_overrides == {"ANTHROPIC_BASE_URL": "http://127.0.0.1:5555"}
+    unrouted = driver.build_turn(ctx(tmp_path))
+    assert unrouted.env_overrides == {}
 
 
 def test_write_driver_config(tmp_path):

@@ -86,7 +86,11 @@ class ApiSurfaceRecorder:
             tools = payload.get("tools")
             if not isinstance(tools, list):
                 raise ValueError
-            names = [t.get("name") for t in tools if isinstance(t, dict)]
+            # name-or-type: hosted tools in the Responses API (web_search and kin)
+            # carry a "type" and no "name"; recording only names would blind the
+            # disallowed-builtins check to exactly the tools it exists to catch.
+            names = [t.get("name") or t.get("type") for t in tools if isinstance(t, dict)]
+            names = [n for n in names if n]
         except (json.JSONDecodeError, UnicodeDecodeError, AttributeError, ValueError):
             with self._lock:
                 self.unrecorded_requests += 1

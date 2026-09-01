@@ -82,9 +82,15 @@ class ClaudeCodeDriver(Driver):
             argv += ["--session-id", session_id]
         elif mode == "resume":
             argv += ["--resume", session_id]
-        return TurnSpec(argv=argv, stdin_text=ctx.prompt, answer_from="stdout")
+        # Route API traffic through the harness recorder (S7 wire capture); claude
+        # honors ANTHROPIC_BASE_URL (measured live 2026-08-31, zero forward errors).
+        env_overrides = ({"ANTHROPIC_BASE_URL": ctx.api_base_url}
+                         if ctx.api_base_url else {})
+        return TurnSpec(argv=argv, stdin_text=ctx.prompt, answer_from="stdout",
+                        env_overrides=env_overrides)
 
-    def attribution_record(self, argv: list[str]) -> dict:
+    def attribution_record(self, turn: TurnSpec) -> dict:
+        argv = turn.argv
         def missing(what: str) -> DriverAttributionError:
             return DriverAttributionError(
                 f"the claude-code argv lacks {what}. The attribution record must be asserted "

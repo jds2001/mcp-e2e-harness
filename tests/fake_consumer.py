@@ -23,9 +23,22 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from mcp_e2e_harness.mcp_client import StdioMCPClient
 
 
+def spawn_env(entry: dict) -> dict:
+    """The env a fake driver hands its MCP child; FAKE_SANITIZE_VARS simulates a
+    driver (codex) that strips named vars from spawned-server environments."""
+    env = dict(os.environ)
+    env.update(entry.get("env") or {})
+    for name in os.environ.get("FAKE_SANITIZE_VARS", "").split(","):
+        env.pop(name, None)
+    return env
+
+
 def main() -> int:
     config = json.loads(Path(sys.argv[1]).read_text())
     prompt = sys.stdin.read()
+
+    if os.environ.get("FAKE_WEB_EVENT"):
+        print("fake web event: searching the live web", file=sys.stderr)
 
     # A real driver sends its requests to the model API; when the harness redirects
     # that traffic (FAKE_API_BASE, the capture proxy), emit one request whose body
@@ -48,9 +61,8 @@ def main() -> int:
             print("I cannot enumerate my tools right now.")
             return 0
         name, entry = next(iter(config["mcpServers"].items()))
-        env = dict(os.environ)
-        env.update(entry.get("env") or {})
-        with StdioMCPClient(entry["command"], entry.get("args") or [], env=env) as client:
+        with StdioMCPClient(entry["command"], entry.get("args") or [],
+                            env=spawn_env(entry)) as client:
             for tool in client.list_tools():
                 print(f"mcp__{name}__{tool['name']}")
         if os.environ.get("FAKE_BUILTIN_PRESENT"):
@@ -62,15 +74,22 @@ def main() -> int:
         return 0
 
     name, entry = next((n, e) for n, e in config["mcpServers"].items() if n != "shared_notes")
-    env = dict(os.environ)
-    env.update(entry.get("env") or {})
-    with StdioMCPClient(entry["command"], entry.get("args") or [], env=env) as client:
+    with StdioMCPClient(entry["command"], entry.get("args") or [],
+                        env=spawn_env(entry)) as client:
         tools = client.list_tools()
         record = client.call_tool("list_unfiled_notes", {})
-    print(f"Server {name} advertises {len(tools)} tools.")
-    print(f"list_unfiled_notes returned: {json.dumps(record['response'])[:400]}")
+    answer_lines = [f"Server {name} advertises {len(tools)} tools.",
+                    f"list_unfiled_notes returned: {json.dumps(record['response'])[:400]}"]
     if "leak" in prompt.lower():
-        print(f"the secret is {os.environ.get('TEST_SECRET_VAR', '')}")
+        answer_lines.append(f"the secret is {os.environ.get('TEST_SECRET_VAR', '')}")
+    answer = "\n".join(answer_lines)
+    # Drivers whose answer travels by file (codex -o): stdout stays an event stream.
+    answer_file = os.environ.get("FAKE_ANSWER_FILE")
+    if answer_file:
+        Path(answer_file).write_text(answer + "\n")
+        print("event: turn complete (answer written to file)")
+    else:
+        print(answer)
     return 0
 
 

@@ -3,7 +3,9 @@
 The driver is part of the instrument: two cells that differ in driver also differ in
 system prompt, tool-call formatting, and client-side behavior the trace cannot see, so
 knobs are recorded in the driver's native vocabulary, verbatim, never translated
-across vendors (documentation/10-harness.md, run mechanics).
+across vendors (documentation/10-harness.md, run mechanics). What each driver must
+establish before it may host attribution cells is per-driver contract, recorded in
+documentation/50-drivers.md.
 """
 from __future__ import annotations
 
@@ -14,7 +16,7 @@ from pathlib import Path
 
 
 class DriverAttributionError(RuntimeError):
-    """The argv about to run does not verifiably close the channels it claims to.
+    """The turn about to run does not verifiably close the channels it claims to.
 
     Raised before anything is spent; the cell is instrument-broken, never run
     unattributable."""
@@ -28,6 +30,11 @@ class TurnSpec:
     # Where the final answer comes from: "stdout", or a file path the driver writes.
     answer_from: str = "stdout"
     answer_path: Path | None = None
+    # Extra environment the runner applies on top of its own when executing this turn
+    # (e.g. CODEX_HOME for an isolated codex home, ANTHROPIC_BASE_URL for the claude
+    # recorder). Recorded in meta as executed material; must never carry a secret
+    # value -- secrets travel by inheritance or the spawn-time secrets file only.
+    env_overrides: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -43,27 +50,50 @@ class TurnContext:
     session: tuple[str, str] = ("single", "")
     prompt: str = ""
     dest: Path = field(default_factory=Path)
+    # The harness API-surface recorder's local URL for this invocation, when capture
+    # is active (S7). The driver routes its outbound model-API traffic through it --
+    # by env var, config, or argv, in its own idiom. None on dry runs and for
+    # capture-less drivers.
+    api_base_url: str | None = None
 
 
 class Driver(ABC):
     id: str
     executable: str
-    # Builtin tool names this driver's argv disallows; the builtin-surface probe (Q2)
-    # checks the consumer's self-reported surface against exactly these names.
+    # Builtin tool names this driver disallows; checked against the calibration
+    # probe's enumeration and against every wire-captured tools array (Q2).
     disallowed_builtins: tuple[str, ...] = ()
     # Default model for the builtin-surface probe when none is given, in the driver's
-    # own vocabulary. Empty means the driver cannot be probed, and therefore may not
-    # host merge-gating cells (the probe gates them).
+    # own vocabulary. Empty means the driver cannot be probed.
     probe_model: str = ""
-    # Env var that redirects this driver's outbound API traffic (e.g.
-    # ANTHROPIC_BASE_URL). Non-empty enables the API-boundary tool-surface capture --
-    # Q2's preferred instrument, wire-level ground truth recorded on every scored
-    # invocation. Empty means capture is unsupported and merge-gating cells fall back
-    # to the calibration probe.
+    # Harness env var that overrides this driver's API upstream (e.g. an operator's
+    # gateway); consulted before api_default_upstream.
     api_base_env: str = ""
-    # Where that traffic goes when the harness's own environment does not already
-    # override api_base_env.
+    # Where the driver's API traffic goes when nothing overrides it. Non-empty means
+    # the driver supports API-boundary capture (Q2's preferred instrument): every
+    # invocation routes through the harness recorder and is verified on the wire.
+    # Empty means capture is unsupported and merge-gating cells fall back to the
+    # calibration probe.
     api_default_upstream: str = ""
+    # Markers of the driver's own web-tool activity in its event streams (stderr, and
+    # stdout when the answer travels by file). Any hit is an instrument breach: the
+    # row is not tool-attributable and the cell is BROKEN (50-drivers.md, codex #5).
+    web_event_markers: tuple[str, ...] = ()
+    # True when the driver sanitizes the environment of MCP servers it spawns, so
+    # {"$secret": ...} values cannot reach the server by inheritance; the runner then
+    # provides a spawn-time secrets file to the proxy (process-env only, never an
+    # artifact -- 50-drivers.md, codex #6).
+    sanitizes_mcp_env: bool = False
+    # Env vars that must be set in the harness environment before this driver can run
+    # at all (e.g. the custom provider's env_key). Checked at preflight, loudly.
+    required_env: tuple[str, ...] = ()
+    # Whether the driver supports multi-turn sessions (crowding pre-turns). A crowded
+    # cell on a driver without sessions is refused at preflight.
+    supports_sessions: bool = True
+
+    @property
+    def supports_api_capture(self) -> bool:
+        return bool(self.api_default_upstream)
 
     def cli_version(self) -> str:
         """The driver CLI's version string, recorded at run time -- never assumed.
@@ -81,15 +111,16 @@ class Driver(ABC):
 
     @abstractmethod
     def write_driver_config(self, dest: Path, server_entries: dict[str, dict]) -> Path:
-        """Write the driver-native MCP registration file pointing at the given
-        stdio commands ({name: {command, args, env?}}); return its path."""
+        """Write the driver-native MCP registration pointing at the given stdio
+        commands ({name: {command, args, env?}}); return the config file's path."""
 
     @abstractmethod
     def build_turn(self, ctx: TurnContext) -> TurnSpec:
-        """The full argv (and answer channel) for one turn."""
+        """The full argv, env overrides, and answer channel for one turn."""
 
     @abstractmethod
-    def attribution_record(self, argv: list[str]) -> dict:
-        """Assert -- from the argv actually about to execute, never from intent --
-        that the non-server channels are closed; return the record of what was
-        verified, in this driver's own vocabulary. Raises DriverAttributionError."""
+    def attribution_record(self, turn: TurnSpec) -> dict:
+        """Assert -- from the turn actually about to execute (argv and env overrides),
+        never from intent -- that the non-server channels are closed; return the
+        record of what was verified, in this driver's own vocabulary. Raises
+        DriverAttributionError."""

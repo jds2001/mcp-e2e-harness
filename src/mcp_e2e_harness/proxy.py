@@ -204,12 +204,38 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--meta-file", required=True)
     parser.add_argument("--allow-tools", default=None,
                         help="comma-separated tool allowlist for list-valued tool_surface cells")
+    parser.add_argument("--secrets-file", default=None,
+                        help="0600 KEY=VALUE file to overlay on this process's environment for "
+                             "$secret resolution -- for drivers (codex) that sanitize the env of "
+                             "MCP servers they spawn, so inheritance delivers nothing here. "
+                             "Written and deleted by the harness; never an operator input.")
     args = parser.parse_args(argv)
 
     config = json.loads(Path(args.server_config).read_text())
     env = dict(os.environ)
+    environ: dict[str, str] = dict(os.environ)
+    if args.secrets_file:
+        # Refuse a file readable by group/other: a shared-readable credential file is
+        # a disclosure, not a configuration; failing loudly at spawn beats trusting
+        # every caller to have set the mode.
+        try:
+            mode = os.stat(args.secrets_file).st_mode
+        except OSError as exc:
+            sys.stderr.write(f"mcp_e2e_harness.proxy: cannot stat secrets file: {exc}\n")
+            return 3
+        if mode & 0o077:
+            sys.stderr.write(
+                f"mcp_e2e_harness.proxy: secrets file {args.secrets_file} is readable by "
+                f"group/other (mode {oct(mode & 0o777)}); refusing to start. chmod 600 it.\n")
+            return 3
+        for line in Path(args.secrets_file).read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line and not line.startswith("#") and "=" in line:
+                key, _, value = line.partition("=")
+                if key and value:
+                    environ[key] = value
     try:
-        resolved, _ = resolve_env_map(config.get("env") or {}, os.environ, where="server env")
+        resolved, _ = resolve_env_map(config.get("env") or {}, environ, where="server env")
     except MissingSecretError as exc:
         sys.stderr.write(f"mcp_e2e_harness.proxy: {exc}\n")
         return 3
