@@ -28,6 +28,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
+
 def _extract_tool_names(payload: dict) -> tuple[list[str] | None, str | None]:
     """The tool surface a request declares, wherever this API dialect carries it.
 
