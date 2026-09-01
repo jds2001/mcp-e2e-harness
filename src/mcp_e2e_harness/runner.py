@@ -29,6 +29,7 @@ import sys
 import tempfile
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -48,6 +49,10 @@ CONTEXT_LEAK_MARKERS = (".git", "CLAUDE.md", "AGENTS.md")
 
 class HarnessError(RuntimeError):
     """A configuration or instrument problem that must halt before results exist."""
+
+
+def _print_log(line: str) -> None:
+    print(line, flush=True)
 
 
 @dataclass(frozen=True)
@@ -70,6 +75,11 @@ class RunConfig:
     drivers: dict[str, Driver] = field(default_factory=lambda: dict(DRIVERS))
     # For tests: where neutral cwds are created (must itself be leak-free).
     tmp_base: Path | None = None
+    # Operator legibility (ruling S9): the runner is never silent. Every progress
+    # line -- run dir up front, cell/prompt starts, turn transitions, per-invocation
+    # completion -- goes through this callable as it happens, so in-flight, hung, and
+    # broken are distinguishable from the terminal without digging.
+    log: Callable[[str], None] = _print_log
 
 
 @dataclass
@@ -80,6 +90,9 @@ class RunResult:
     zero_trace_cells: list[str]
     checks_report: list[dict]
     driver_probes: dict[str, dict] = field(default_factory=dict)
+    # Cells BROKEN by the S8 spawn liveness gate, with reasons; their prompts were
+    # skipped without spending model turns.
+    voided_cells: dict[str, str] = field(default_factory=dict)
 
 
 def plan_invocations(manifest: Manifest, cells: list[str],
@@ -340,11 +353,14 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     else:
         try:
             if cell.get("setup"):
+                config.log(f"     setup: {len(cell['setup'])} direct server-side action(s)")
                 setup_records = _run_setup(manifest, cell, dest, scan)
             if crowded and procedure is not None:
+                config.log(f"     crowding pre-turn: {procedure.full_name}")
                 crowding_record = _crowding_preturn(
                     driver, ctx_base, procedure, dest, cwd, config.timeout_s, scan,
                     session_id, dest / "mcp-config-crowding.json", env=turn_env)
+            config.log(f"     scored turn: {cell['driver']} {cell['model']}")
             proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text, env=turn_env,
                                   capture_output=True, text=True, timeout=config.timeout_s)
             exit_status = proc.returncode
@@ -482,6 +498,62 @@ def write_cell_void(run_dir: Path, cell_name: str, reason: str) -> None:
         "reason": reason,
         "scoring_rule": "Do not score any row of this cell as a consumer result.",
     }, indent=2) + "\n")
+
+
+# ------------------------------------------- spawn liveness (ruling S8, from DR-1)
+
+def spawn_liveness_check(manifest: Manifest, cell: dict, dest_dir: Path,
+                         scan: list[str], tmp_base: Path | None = None) -> dict:
+    """Fail-fast instrument liveness at spawn: is the SUT alive under cell conditions?
+
+    Grounded in DR-1 (documentation/90-open-questions.md): the first real suite's
+    server command was cwd-dependent, died with exit 2 at every spawn, and the harness
+    still spent full model turns whose answers came from priors -- three cells
+    completed wearing harness_failure: null. Per S8, a SUT that exits or fails to
+    advertise tools before the consumer turn begins BREAKS the cell immediately,
+    without spending the model turn.
+
+    Runs from a fresh NEUTRAL cwd with the cell's resolved env -- the invocation's own
+    conditions; a check from the harness's cwd would have passed while every real turn
+    failed, which is exactly the DR-1 mechanism. The check spawns its own short-lived
+    server process (permitted like setup: harness-side, direct, recorded) and asks for
+    initialize + tools/list; breach conditions are spawn/initialize failure, zero
+    advertised tools, and -- for list-valued surfaces -- a surface tool the server
+    does not advertise (the effective surface would be empty of it: the same
+    dead-instrument shape).
+    """
+    transport = manifest.server["transport"]
+    resolved_env, _ = resolve_env_map(_server_env_spec(manifest, cell), where="spawn-check env")
+    env = dict(os.environ)
+    env.update(resolved_env)
+    cwd = make_neutral_cwd("spawncheck", tmp_base)
+    record: dict = {"at": _utcnow(), "cwd": str(cwd)}
+    client = StdioMCPClient(transport["command"], list(transport.get("args") or []),
+                            env=env, cwd=str(cwd), timeout=60)
+    try:
+        client.start()
+        names = [t.get("name") for t in client.list_tools()]
+        record["advertised_tools"] = names
+        surface = cell["tool_surface"]
+        missing = [t for t in surface if t not in names] if surface != "full" else []
+        if not names:
+            record.update(ok=False, reason="the server advertises zero tools; every prompt "
+                                           "would run against an empty surface")
+        elif missing:
+            record.update(ok=False,
+                          reason=f"tool_surface names {missing} that the server does not "
+                                 "advertise; the cell's effective surface would be missing them")
+        else:
+            record.update(ok=True, reason=None)
+    except MCPClientError as exc:
+        record.update(ok=False, advertised_tools=None,
+                      reason=f"the server failed at spawn: {exc}")
+    finally:
+        client.close()
+        record["stderr_tail"] = "".join(getattr(client, "stderr_tail", []) or [])[-1200:]
+    dest_dir.mkdir(parents=True, exist_ok=True)
+    _write_scanned(dest_dir / "spawn-check.json", json.dumps(record, indent=2) + "\n", scan)
+    return record
 
 
 # -------------------------- builtin-surface calibration probe (Q2 fallback instrument)
@@ -690,6 +762,16 @@ def run(config: RunConfig) -> RunResult:
     driver_versions = ({d: None for d in driver_ids} if config.dry_run else
                        {d: config.drivers[d].cli_version() for d in sorted(driver_ids)})
 
+    # S9: the run directory is named up front, before anything can go wrong, so an
+    # operator who suspects trouble knows where the artifacts are.
+    log = config.log
+    log(f"manifest   : {manifest.sha256[:16]}  ({manifest.path})")
+    log(f"run dir    : {config.run_dir}")
+    log(f"invocations: {len(planned)}   (one fresh process each -- never batched)"
+        + ("   [DRY RUN]" if config.dry_run else ""))
+    for driver_id in sorted(driver_ids):
+        log(f"driver     : {driver_id}  [{driver_versions[driver_id] or 'not recorded: dry run'}]")
+
     # Q2 gate for drivers WITHOUT API-boundary capture: before any prompt is spent,
     # such a driver hosting a merge-gating cell runs the calibration probe (a
     # discarded invocation under the identical configuration). A non-passing probe
@@ -709,6 +791,7 @@ def run(config: RunConfig) -> RunResult:
                 config.drivers[driver_id], config.run_dir / "driver-probe" / driver_id,
                 timeout_s=config.timeout_s, tmp_base=config.tmp_base, scan=scan)
             driver_probes[driver_id] = record
+            log(f"probe      : {driver_id} builtin surface -> {record['verdict']}")
             if record["verdict"] != PROBE_PASS:
                 raise HarnessError(
                     f"builtin-surface probe for driver {driver_id!r} returned "
@@ -716,13 +799,53 @@ def run(config: RunConfig) -> RunResult:
                     f"as instrument-broken; evidence in "
                     f"{config.run_dir / 'driver-probe' / driver_id / 'probe.json'}.")
 
-    results: list[dict] = []
-    failures = 0
+    by_cell: dict[str, list[Planned]] = {}
     for item in planned:
-        meta = run_one(config, item, driver_versions)
-        results.append(meta)
-        if meta["harness_failure"]:
-            failures += 1
+        by_cell.setdefault(item.cell_name, []).append(item)
+
+    results: list[dict] = []
+    voided: dict[str, str] = {}
+    failures = 0
+    for cell_name in config.cells:
+        cell_planned = by_cell.get(cell_name, [])
+        if not cell_planned:
+            continue
+        cell = manifest.cells[cell_name]
+        # S8 (from DR-1): fail-fast instrument liveness at spawn. The SUT is spawned
+        # once per cell under the invocation's own conditions (neutral cwd, cell env)
+        # BEFORE any model turn; a dead or toolless server breaks the cell here,
+        # with zero prompts spent, and the breach is surfaced live.
+        if not config.dry_run:
+            check = spawn_liveness_check(manifest, cell, config.run_dir / cell_name,
+                                         scan, config.tmp_base)
+            if check["ok"]:
+                log(f"cell {cell_name}: spawn check live "
+                    f"({len(check['advertised_tools'])} tool(s) advertised); "
+                    f"{len(cell_planned)} prompt(s)")
+            else:
+                reason = (f"instrument liveness failed at spawn (S8): {check['reason']}. "
+                          "No model turn was spent. See spawn-check.json (stderr tail "
+                          "included) beside CELL-VOID.json.")
+                write_cell_void(config.run_dir, cell_name, reason)
+                voided[cell_name] = reason
+                failures += 1
+                log(f"cell {cell_name}: BROKEN at spawn -- {check['reason']}")
+                log(f"  {len(cell_planned)} prompt(s) skipped without spending model turns; "
+                    f"evidence: {config.run_dir / cell_name / 'spawn-check.json'}")
+                continue
+        for item in cell_planned:
+            entry = item.entry
+            log(f"  -> {cell_name}/{entry['id']}"
+                + ("  [outside cell groups]" if item.outside_cell_groups else ""))
+            meta = run_one(config, item, driver_versions)
+            results.append(meta)
+            flag = ""
+            if meta["harness_failure"]:
+                failures += 1
+                flag = f"  HARNESS FAILURE: {meta['harness_failure'][:90]}"
+            log(f"     {entry['id']:6s} {meta['duration_s']:6.1f}s  "
+                f"{meta['trace_records']:>3} trace record(s)  "
+                f"{meta['answer_chars']:>6} chars{flag}")
 
     dead = zero_trace_cells(results, config.dry_run)
     failures += len(dead)
@@ -737,6 +860,9 @@ def run(config: RunConfig) -> RunResult:
             row = json.loads(row_path.read_text())
             row["cell_void"] = reason
             row_path.write_text(json.dumps(row, indent=2) + "\n")
+    for cell_name in dead:
+        log(f"cell {cell_name}: BROKEN -- zero trace records across every invocation; "
+            "an empty run, not a clean one. Do not score it.")
 
     checks_report: list[dict] = []
     if manifest.checks and not config.dry_run:
@@ -749,6 +875,12 @@ def run(config: RunConfig) -> RunResult:
         failures += sum(1 for c in checks_report if c["outcome"] == "error")
         (config.run_dir / "checks-report.json").write_text(
             json.dumps(checks_report, indent=2) + "\n")
+        for check in checks_report:
+            log(f"check      : {check['id']}: {check['outcome']}  (matched {check['matched']})")
+
+    log(f"harness failures: {failures}  (these are NOT consumer results)")
+    log("This harness does not score. Pass/fail against the pinned criteria in each "
+        "meta.json is a human/spec-session judgment.")
 
     run_manifest = {
         "harness_version": __version__,
@@ -765,6 +897,7 @@ def run(config: RunConfig) -> RunResult:
         "cells": {c: manifest.cells[c] for c in config.cells},
         "fixtures": manifest.fixtures,
         "dry_run": config.dry_run,
+        "voided_cells": voided,
         "zero_trace_cell_failures": dead,
         "checks": {c["id"]: c["outcome"] for c in checks_report},
         "failures": failures,
@@ -774,4 +907,4 @@ def run(config: RunConfig) -> RunResult:
                    json.dumps(run_manifest, indent=2) + "\n", scan)
     return RunResult(run_dir=config.run_dir, results=results, failures=failures,
                      zero_trace_cells=dead, checks_report=checks_report,
-                     driver_probes=driver_probes)
+                     driver_probes=driver_probes, voided_cells=voided)

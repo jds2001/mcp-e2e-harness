@@ -33,9 +33,11 @@ Run bytes land in a gitignored `runs/<timestamp>/` tree (disposable; the scored 
 - `available-tools.json` — the recorded available-tool surface (disabling a tool is a claim; the tool listing is the evidence).
 - `answer.txt`, `runner-stderr.txt`, `meta.json` (knobs verbatim in the driver's vocabulary, manifest hash, argv, asserted attribution record, pinned criteria), `mcp-config.json`, `server-config.json`, and — when applicable — `setup.json`, `crowding.json`, `proxy-meta.json`.
 
-Plus `run-manifest.json` and `checks-report.json` at the run root. Layer-1 checks report one of **pass / fail / vacuous / error** per check — the four outcomes are never collapsed.
+Plus, per cell, `spawn-check.json` — the S8 fail-fast liveness gate: before any model turn is spent, the SUT is spawned once under the invocation's own conditions (neutral cwd, cell env) and must initialize and advertise its tools; a dead or toolless server BREAKS the cell immediately (`CELL-VOID.json`, prompts skipped, breach surfaced live), which is how a cwd-dependent server command dies loudly instead of letting the consumer answer from priors (defect DR-1). And `run-manifest.json` and `checks-report.json` at the run root. Layer-1 checks report one of **pass / fail / vacuous / error** per check — the four outcomes are never collapsed.
 
-Built-in and not waivable: secret hygiene (no configured secret material in any artifact — the run halts) and instrument liveness (a cell whose every invocation recorded zero trace records is reported BROKEN, never clean).
+The runner is never silent (ruling S9): it names the run directory up front and reports live — spawn checks, each cell/prompt as it starts, turn transitions (setup, crowding pre-turn, scored turn), and per-invocation completion with wall clock and trace-record count — so in-flight, hung, and broken are distinguishable from the terminal.
+
+Built-in and not waivable: secret hygiene (no configured secret material in any artifact — the run halts) and instrument liveness (fail-fast at spawn per the above, plus a cell whose every invocation recorded zero trace records is reported BROKEN, never clean).
 
 ## Verifying the builtin-tool surface (Q2)
 

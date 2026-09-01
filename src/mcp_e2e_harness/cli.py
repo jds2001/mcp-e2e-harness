@@ -72,6 +72,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         timeout_s=args.timeout,
     )
+    # The runner itself reports live (ruling S9: never silent -- run dir up front,
+    # cell/prompt starts, turn transitions, completions); nothing to repeat here.
     try:
         result = run(config)
     except (HarnessError, MissingSecretError) as exc:
@@ -80,27 +82,6 @@ def cmd_run(args: argparse.Namespace) -> int:
     except SecretLeakError as exc:
         print(f"FATAL: {exc}")
         return 2
-
-    print(f"manifest   : {manifest.sha256[:16]}  ({manifest.path})")
-    print(f"run dir    : {result.run_dir}")
-    for driver_id, record in result.driver_probes.items():
-        print(f"probe      : {driver_id} builtin surface -> {record['verdict']}  "
-              f"(driver-probe/{driver_id}/probe.json)")
-    print(f"invocations: {len(result.results)}   (one fresh process each -- never batched)")
-    for meta in result.results:
-        flag = "  [outside cell groups]" if meta["outside_cell_groups"] else ""
-        if meta["harness_failure"]:
-            flag += f"  HARNESS FAILURE: {meta['harness_failure'][:70]}"
-        print(f"  {meta['prompt_id']:6s} {meta['cell']:14s} {meta['duration_s']:6.1f}s  "
-              f"{meta['trace_records']:>3} trace records  {meta['answer_chars']:>6} chars{flag}")
-    for cell in result.zero_trace_cells:
-        print(f"  BROKEN: cell {cell!r} recorded ZERO trace records across every invocation. "
-              "The tools were never called -- an empty run, not a clean one. Do not score it.")
-    for check in result.checks_report:
-        print(f"  check {check['id']}: {check['outcome']}  (matched {check['matched']})")
-    print(f"harness failures: {result.failures}  (these are NOT consumer results)")
-    print("This harness does not score. Pass/fail against the pinned criteria in each "
-          "meta.json is a human/spec-session judgment.")
     return 1 if result.failures else 0
 
 

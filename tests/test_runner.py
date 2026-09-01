@@ -32,7 +32,8 @@ def load(tmp_path, data) -> Manifest:  # noqa: F821
 def config_for(tmp_path, data, fake_drivers, **overrides) -> RunConfig:
     manifest = load(tmp_path, data)
     defaults = dict(manifest=manifest, run_dir=tmp_path / "run",
-                    cells=list(manifest.cells), drivers=fake_drivers, timeout_s=120)
+                    cells=list(manifest.cells), drivers=fake_drivers, timeout_s=120,
+                    log=lambda line: None)
     defaults.update(overrides)
     return RunConfig(**defaults)
 
@@ -172,6 +173,98 @@ def test_relative_run_dir_still_yields_absolute_config_paths(tmp_path, fake_driv
     config_path = Path(result.results[0]["command"][2])  # FakeDriver argv: [py, consumer, config]
     assert config_path.is_absolute()
     assert config_path.exists()
+
+
+# ------------------------------------- spawn liveness, S8 (DR-1) + operator log, S9
+
+def test_dead_sut_breaks_the_cell_before_any_model_turn(tmp_path, fake_drivers):
+    # DR-1's shape: the server command dies at spawn (unknown procedure -> exit 2).
+    data = manifest_data()
+    data["server"]["transport"]["args"] = [
+        "-m", "mcp_e2e_harness.distractor", "--procedure", "ghost@9"]
+    config = config_for(tmp_path, data, fake_drivers)
+    result = run(config)
+    assert result.voided_cells and "spawn" in result.voided_cells["basic"]
+    assert result.failures == 1
+    # Zero model turns were spent: no invocation directory, no result rows.
+    assert result.results == []
+    assert not (config.run_dir / "basic" / "A").exists()
+    void = json.loads((config.run_dir / "basic" / "CELL-VOID.json").read_text())
+    assert void["verdict"] == "BROKEN"
+    check = json.loads((config.run_dir / "basic" / "spawn-check.json").read_text())
+    assert check["ok"] is False
+    assert "ghost@9" in check["stderr_tail"]  # the server's own account is kept
+    run_manifest = json.loads((config.run_dir / "run-manifest.json").read_text())
+    assert "basic" in run_manifest["voided_cells"]
+
+
+def test_spawn_check_runs_under_invocation_conditions_neutral_cwd(tmp_path, fake_drivers):
+    # DR-1's mechanism was cwd-dependence: a check from the harness cwd would pass
+    # while every real turn failed. The check must run from a neutral cwd.
+    config = config_for(tmp_path, manifest_data(), fake_drivers)
+    result = run(config)
+    assert result.failures == 0
+    check = json.loads((config.run_dir / "basic" / "spawn-check.json").read_text())
+    assert check["ok"] is True
+    assert check["advertised_tools"] == ["list_unfiled_notes", "read_note", "file_note"]
+    cwd = Path(check["cwd"])
+    assert cwd != Path.cwd()
+    assert Path.cwd() not in cwd.parents
+
+
+def test_zero_tool_server_breaks_at_spawn(tmp_path, fake_drivers):
+    data = manifest_data()
+    data["server"]["transport"]["args"] = [str(Path(__file__).parent / "fake_empty_server.py")]
+    config = config_for(tmp_path, data, fake_drivers)
+    result = run(config)
+    assert "zero tools" in result.voided_cells["basic"]
+    assert result.results == []
+
+
+def test_unadvertised_surface_tool_breaks_at_spawn(tmp_path, fake_drivers):
+    data = manifest_data()
+    data["cells"]["basic"]["tool_surface"] = ["read_note", "ghost_tool"]
+    config = config_for(tmp_path, data, fake_drivers)
+    result = run(config)
+    assert "ghost_tool" in result.voided_cells["basic"]
+    assert result.results == []
+
+
+def test_dry_run_skips_the_spawn_check(tmp_path, fake_drivers):
+    data = manifest_data()
+    data["server"]["transport"]["args"] = [
+        "-m", "mcp_e2e_harness.distractor", "--procedure", "ghost@9"]
+    config = config_for(tmp_path, data, fake_drivers, dry_run=True)
+    result = run(config)
+    assert result.voided_cells == {}
+    assert len(result.results) == 1
+
+
+def test_runner_is_never_silent(tmp_path, fake_drivers):
+    # S9: run dir named up front; cell/prompt starts, turn transitions, and
+    # completions visible live; in-flight vs broken distinguishable.
+    lines: list[str] = []
+    config = config_for(tmp_path, manifest_data(), fake_drivers, log=lines.append)
+    run(config)
+    joined = "\n".join(lines)
+    run_dir_at = next(i for i, line in enumerate(lines) if "run dir" in line)
+    first_invocation_at = next(i for i, line in enumerate(lines) if "-> basic/A1" in line)
+    assert run_dir_at < first_invocation_at  # named before anything can go wrong
+    assert any("spawn check live" in line for line in lines)
+    assert "scored turn" in joined
+    assert any("trace record(s)" in line for line in lines)
+    assert "harness failures: 0" in joined
+
+
+def test_broken_spawn_is_surfaced_live(tmp_path, fake_drivers):
+    lines: list[str] = []
+    data = manifest_data()
+    data["server"]["transport"]["args"] = [
+        "-m", "mcp_e2e_harness.distractor", "--procedure", "ghost@9"]
+    config = config_for(tmp_path, data, fake_drivers, log=lines.append)
+    run(config)
+    assert any("BROKEN at spawn" in line for line in lines)
+    assert any("skipped without spending model turns" in line for line in lines)
 
 
 # ------------------------------------------ API-boundary surface capture (Q2, wire)
