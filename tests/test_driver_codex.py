@@ -38,6 +38,7 @@ def test_argv_closes_the_channels_and_routes_through_the_recorder(tmp_path):
     assert argv[argv.index("-s") + 1] == "read-only"
     assert 'approval_policy="never"' in argv
     assert "tools.web_search=false" in argv
+    assert "features.plugins=false" in argv  # measured effective; suppresses plugin-sync fetch
     # The noweb provider IS the recorder (reqs 3+4).
     assert f'model_provider={toml_quote(PROVIDER_ID)}' in argv
     assert f'model_providers.{PROVIDER_ID}.base_url="http://127.0.0.1:5555/v1"' in argv
@@ -93,6 +94,7 @@ def test_attribution_record_verifies_the_executed_turn(tmp_path):
     assert record["provider_base_url"] == '"http://127.0.0.1:5555/v1"'
     assert "harness recorder" in record["model_provider"]
     assert "API-key only" in record["codex_home"]
+    assert "measured effective" in record["features.plugins"]
 
     def tampered(argv=None, env=None) -> TurnSpec:
         return TurnSpec(argv=list(argv if argv is not None else turn.argv), stdin_text="",
@@ -115,5 +117,34 @@ def test_attribution_record_verifies_the_executed_turn(tmp_path):
     with pytest.raises(DriverAttributionError, match="web_search"):
         driver.attribution_record(tampered(
             [a for a in turn.argv if a != "tools.web_search=false"]))
+    with pytest.raises(DriverAttributionError, match="features.plugins"):
+        driver.attribution_record(tampered(
+            [a for a in turn.argv if a != "features.plugins=false"]))
     with pytest.raises(DriverAttributionError, match="CODEX_HOME"):
         driver.attribution_record(tampered(env={}))
+
+
+def test_environment_state_reports_no_fetch_when_absent(tmp_path):
+    # No CODEX_HOME/.tmp/plugins.sha at all -- the common case, and must not be
+    # conflated with "sync ran but produced no SHA".
+    driver = CodexDriver()
+    turn = driver.build_turn(ctx(tmp_path))
+    state = driver.environment_state(turn)
+    assert state["plugin_sync"]["fetched_sha"] is None
+
+
+def test_environment_state_lifts_the_fetched_sha(tmp_path):
+    # 50-drivers.md Residual 2: codex's own plugin-sync fetch into the isolated home,
+    # measured live as a shallow clone of github.com/openai/plugins with a FETCH_HEAD.
+    driver = CodexDriver()
+    turn = driver.build_turn(ctx(tmp_path))
+    sha_path = tmp_path / "codex-home" / ".tmp" / "plugins.sha"
+    sha_path.parent.mkdir(parents=True)
+    sha_path.write_text("1e285826e604f66f7208f7ac4dba0fe8341d1f57\n")
+    state = driver.environment_state(turn)
+    assert state["plugin_sync"]["fetched_sha"] == "1e285826e604f66f7208f7ac4dba0fe8341d1f57"
+
+
+def test_environment_state_none_without_codex_home(tmp_path):
+    turn = TurnSpec(argv=["codex"], stdin_text="", env_overrides={})
+    assert CodexDriver().environment_state(turn) is None

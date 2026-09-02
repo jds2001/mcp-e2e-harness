@@ -130,3 +130,13 @@ class Driver(ABC):
         never from intent -- that the non-server channels are closed; return the
         record of what was verified, in this driver's own vocabulary. Raises
         DriverAttributionError."""
+
+    def environment_state(self, turn: TurnSpec) -> dict | None:
+        """Vendor-pushed state that entered THIS invocation's environment at run time,
+        outside anything the harness configured -- e.g. a CLI's own plugin-sync fetch
+        into an otherwise-isolated home directory (50-drivers.md, codex Residual 2).
+        Called after the turn has executed, so it can observe what the run actually
+        left behind; read from paths the turn's env overrides establish. None means
+        the driver has nothing of this kind to report. Must never return a secret
+        value -- only state that is itself evidence of drift, like a fetched SHA."""
+        return None

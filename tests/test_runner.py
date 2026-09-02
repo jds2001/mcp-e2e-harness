@@ -583,10 +583,27 @@ def test_end_to_end_records_trace_and_checks(tmp_path, fake_drivers):
     meta_json = json.loads((dest / "meta.json").read_text())
     assert meta_json["recorded_tool_surface"]["advertised"] == surface["advertised"]
     assert meta_json["criteria"]["pass"] == "lists notes"
+    # A driver with nothing to report (the base default) reads None, not absent.
+    assert meta_json["environment_state"] is None
 
     by_id = {c["id"]: c["outcome"] for c in result.checks_report}
     assert by_id == {"content-typed": "pass", "never-fires": "vacuous", "forbid-ghost": "pass"}
     assert (config.run_dir / "checks-report.json").exists()
+
+
+def test_environment_state_is_lifted_into_meta_when_the_driver_reports_it(tmp_path, fake_drivers):
+    # 50-drivers.md Residual 2: a driver can observe vendor-pushed state that entered
+    # its own invocation (e.g. codex's plugin-sync fetch) only after the turn runs.
+    # This is a generic exercise of that plumbing, not a codex-specific claim.
+    class ReportingDriver(fake_drivers["fake"].__class__):
+        def environment_state(self, turn):
+            return {"plugin_sync": {"fetched_sha": "deadbeef"}}
+
+    drivers = dict(fake_drivers, fake=ReportingDriver())
+    config = config_for(tmp_path, manifest_data(), drivers)
+    run(config)
+    meta = json.loads((config.run_dir / "basic" / "A" / "A1" / "meta.json").read_text())
+    assert meta["environment_state"] == {"plugin_sync": {"fetched_sha": "deadbeef"}}
 
 
 def test_zero_trace_cell_is_broken_never_clean(tmp_path, fake_drivers):

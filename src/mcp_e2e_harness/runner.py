@@ -492,6 +492,10 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
                     "API surface capture recorded zero readable model requests: builtin "
                     f"absence is unverified for this invocation{detail}")
 
+    # Read AFTER the turn executes: vendor-pushed state (e.g. codex's own plugin-sync
+    # fetch) lands mid-invocation, never at build_turn time (50-drivers.md Residual 2).
+    environment_state = driver.environment_state(turn) if not config.dry_run else None
+
     duration = round(time.perf_counter() - t0, 2)
     records, parse_errors = _read_trace(dest / "trace.jsonl")
     if (dest / "trace.jsonl").exists():
@@ -543,6 +547,10 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         # Executed environment material the runner applied for this turn (e.g. the
         # isolated CODEX_HOME, the recorder URL). Never carries secret values.
         "env_overrides": turn.env_overrides,
+        # Vendor-pushed state observed in the invocation's environment after the turn
+        # ran, outside anything the harness configured (e.g. codex's own plugin-sync
+        # fetch into CODEX_HOME); null for drivers with nothing of this kind to report.
+        "environment_state": environment_state,
         "setup": setup_records,
         "crowding": ({"procedure": procedure.name, "version": procedure.version,
                       "content_hash": procedure.content_hash(),
@@ -774,6 +782,7 @@ def probe_builtin_surface(driver: Driver, dest: Path, *, model: str | None = Non
         "prompt": PROBE_PROMPT,
         "command": turn.argv,
         "attribution": attribution,
+        "environment_state": driver.environment_state(turn),
         "started_utc": started,
         "finished_utc": _utcnow(),
         "exit_status": exit_status,
@@ -919,6 +928,7 @@ def probe_egress(driver: Driver, dest: Path, *, model: str | None = None,
         "command": turn.argv,
         "env_overrides": turn.env_overrides,
         "attribution": attribution,
+        "environment_state": driver.environment_state(turn),
         "started_utc": started,
         "finished_utc": _utcnow(),
         "exit_status": exit_status,

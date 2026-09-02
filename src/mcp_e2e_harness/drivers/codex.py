@@ -78,6 +78,18 @@ ruling itself is the spec session's):
   the canary (runs/2026-09-01-codex-egress-canary). Per the settling ruling, scoring
   of codex attribution cells still reviews recorded exec events alongside the trace;
   the events land in runner-stdout.txt / runner-stderr.txt per invocation.
+* Plugin-sync residual (50-drivers.md Residual 2, opened from that same canary's own
+  artifacts): the isolated CODEX_HOME contained a shallow clone of
+  ``github.com/openai/plugins`` with a ``FETCH_HEAD`` -- the CLI's own network I/O,
+  independent of the sandbox/provider controls that govern the consumer. Measured
+  2026-09-01 across five isolated-home trials (no model call required -- the fetch
+  happens at startup regardless of turn outcome): ``-c features.plugins=false``
+  reliably suppressed it; ``-c features.remote_plugin=false`` and
+  ``-c plugins.marketplaces=[]`` did not (dead knobs, consistent with this CLI's
+  history). The working flag is now in the argv (asserted in ``attribution_record``)
+  and verified per invocation by ``environment_state`` reading
+  ``CODEX_HOME/.tmp/plugins.sha`` -- expected null; a non-null value is regression,
+  not noise.
 """
 from __future__ import annotations
 
@@ -181,6 +193,15 @@ class CodexDriver(Driver):
             # web tool stayed live and was used, including sandbox-evasion attempts).
             # The provider mechanism below is the actual web-disable.
             "-c", "tools.web_search=false",
+            # Suppresses the CLI's own plugin-marketplace sync fetch (50-drivers.md
+            # Residual 2: codex fetches github.com/openai/plugins into CODEX_HOME on
+            # its own, independent of the sandbox/provider controls that govern the
+            # consumer). Unlike tools.web_search, this one is measured EFFECTIVE
+            # 2026-09-01 under codex-cli 0.147.0 (`features.remote_plugin=false` and
+            # `plugins.marketplaces=[]` were both measured dead; this is not). Kept
+            # under continuous per-invocation verification anyway (environment_state
+            # below), because this CLI's knobs have a measured history of regressing.
+            "-c", "features.plugins=false",
             # The noweb custom provider IS the harness recorder (requirements 3+4):
             # custom providers declare no supports_standalone_web_search, so the CLI
             # registers no web tool; base_url routes every request through the
@@ -242,6 +263,9 @@ class CodexDriver(Driver):
             raise missing(f"-c model_providers.{PROVIDER_ID}.env_key (API-key credentials only)")
         if "tools.web_search=false" not in argv:
             raise missing("-c tools.web_search=false (belt; the provider is the mechanism)")
+        if "features.plugins=false" not in argv:
+            raise missing("-c features.plugins=false (measured effective 2026-09-01; suppresses "
+                          "the CLI's own plugin-marketplace fetch -- 50-drivers.md Residual 2)")
         codex_home = turn.env_overrides.get("CODEX_HOME")
         if not codex_home:
             raise missing("a CODEX_HOME env override (the isolated, harness-authored home is "
@@ -259,6 +283,34 @@ class CodexDriver(Driver):
             "tools.web_search": "false (belt; measured dead under both auth modes -- effect "
                                 "rests on the provider mechanism and is verified per "
                                 "invocation on the wire and in the event stream)",
+            "features.plugins": "false (measured effective 2026-09-01, unlike tools.web_search; "
+                               "suppresses the CLI's own plugin-marketplace fetch and is "
+                               "verified per invocation via environment_state)",
             "codex_home": f"{codex_home} (harness-authored, fresh per invocation; no ChatGPT "
                           "login state exists in it, so credentials are API-key only)",
+        }
+
+    # Relative to CODEX_HOME: where 0.147.0 leaves the fetched marketplace state after
+    # its own plugin-sync fetch (measured live 2026-09-01, runs/2026-09-01-codex-egress-
+    # canary -- a shallow clone of github.com/openai/plugins with a FETCH_HEAD, despite
+    # the isolated home, the noweb provider, and the read-only sandbox; those govern
+    # the consumer, this is the CLI acting on its own -- 50-drivers.md Residual 2).
+    PLUGIN_SYNC_SHA_REL = Path(".tmp") / "plugins.sha"
+
+    def environment_state(self, turn: TurnSpec) -> dict | None:
+        codex_home = turn.env_overrides.get("CODEX_HOME")
+        if not codex_home:
+            return None
+        sha_path = Path(codex_home) / self.PLUGIN_SYNC_SHA_REL
+        fetched_sha = sha_path.read_text().strip() if sha_path.exists() else None
+        return {
+            "plugin_sync": {
+                "fetched_sha": fetched_sha,
+                "note": ("the codex CLI's own plugin-sync fetch into CODEX_HOME, "
+                         "independent of the sandbox/provider controls that govern the "
+                         "consumer; null means no fetch was recorded for this "
+                         "invocation. Compare across invocations of the same cell -- "
+                         "a changing SHA is environment drift the two-source rule did "
+                         "not anticipate (50-drivers.md Residual 2)."),
+            },
         }
