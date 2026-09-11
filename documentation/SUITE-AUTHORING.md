@@ -58,7 +58,7 @@ One JSON file. Top level: `suite`, `server` (required); `fixtures`, `rubrics`, `
       "driver": "codex", "model": "gpt-5.6-luna", "knobs": {"reasoning_effort": "medium"},
       "role": "cross-vendor-floor", "context": "fresh",
       "tool_surface": ["search_thing", "get_thing"], "merge_gating": false, "groups": ["A"],
-      "notes": "non-gating by rule: a cross-vendor cell never substitutes for a primary-vendor gate"
+      "notes": "gating is this suite's own choice (S11); a cross-vendor cell never substitutes for a primary-vendor gate"
     }
   },
   "checks": [
@@ -94,7 +94,7 @@ Notes on the parts that bite:
 A codex cell is three manifest fields — `"driver": "codex"`, a codex model id, and codex-native knobs (`reasoning_effort`, not `thinking`) — as the skeleton's `cross-vendor-floor` shows. Everything attribution-critical is the driver's job, not yours, and none of it is configurable from the manifest: isolated per-invocation `CODEX_HOME`, web-tool removal via the harness's recording provider, the read-only sandbox, plugin-sync suppression, and per-invocation wire verification all happen automatically, and a violation breaks the cell rather than tainting your data. What you do need to know:
 
 - **Credentials**: the harness environment must carry an OpenAI **API key** for the recording provider to forward with; the driver refuses ChatGPT-login state for attribution cells. Driver credentials live in the harness environment, not in your manifest — the manifest's `{"$secret": …}` mechanism is for *your server's* keys, and it works identically under codex (the harness injects them past codex's env sanitization; you author nothing extra).
-- **Role and gating**: give codex cells a `cross-vendor-*` role and `merge_gating: false` unless your spec explicitly rules otherwise; the gate for a behavior stays with your primary-vendor cells.
+- **Role and gating**: give codex cells a `cross-vendor-*` role; whether they gate is your suite's decision like any cell (S11 in the harness spec). The one hard rule is substitution, not gating: a cross-vendor cell never stands in for a gating cell of your primary vendor.
 - **Version sensitivity**: the codex driver contract is verified against a pinned codex-cli version (see the harness repo's `50-drivers.md`); on a different local version the harness re-verifies before attribution cells run — expect that, don't fight it.
 
 ## Checks (Layer 1) — mechanical trace conformance

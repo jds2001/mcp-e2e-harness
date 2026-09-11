@@ -55,7 +55,7 @@ Run bytes land in a gitignored `runs/` directory — bytes are disposable; the s
 
 ## Cells
 
-A cell is identified by (driver, model, knobs, tool surface, context condition, setup, prompt selection). The grid grows only when a question needs a new cell. Four roles recur and are recommended as the starting grid, but the roster is the suite's choice:
+A cell is identified by (driver, model, knobs, tool surface, context condition, setup, prompt selection), plus any identity components the driver's contract in `50-drivers.md` adds (the loop driver adds scaffold version and provider pin — S11). The grid grows only when a question needs a new cell. Four roles recur and are recommended as the starting grid, but the roster is the suite's choice:
 
 | role | what it isolates | typical shape |
 |---|---|---|
