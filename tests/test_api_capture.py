@@ -9,6 +9,7 @@ import json
 import urllib.error
 import urllib.request
 
+import brotli
 import pytest
 from conftest import FAKE_COUNT_TOKENS_VALUE
 
@@ -229,21 +230,65 @@ def test_count_tokens_scalar_lands_on_the_calling_request_only(tmp_path, fake_ap
     assert "fake-upstream" not in raw
     digest = summarize(tmp_path / "cap.jsonl", ("Bash",))
     assert digest["count_tokens_calls"] == 1
+    assert digest["count_tokens_unread"] == 0
     assert digest["requests_recorded"] == 3
 
 
-def test_count_tokens_is_read_through_a_gzip_response(tmp_path, fake_api_upstream):
+@pytest.mark.parametrize("encoding, decode", [("gzip", gzip.decompress), ("br", brotli.decompress)])
+def test_count_tokens_is_read_through_the_negotiated_response_encoding(
+        tmp_path, fake_api_upstream, encoding, decode):
+    # DR-3 (2026-09-16): the upstream answered every observed count-tokens call
+    # brotli-encoded and the recorder decoded only gzip/deflate. It may not narrow
+    # the negotiation (that modifies traffic), so it decodes what was negotiated.
     recorder = ApiSurfaceRecorder(tmp_path / "cap.jsonl", fake_api_upstream)
     base = recorder.start()
     try:
         response = post(base, "/v1/messages/count_tokens", {"model": "m-1", "messages": []},
-                        headers={"X-Fake-Gzip-Response": "1"})
-        assert response.headers.get("Content-Encoding") == "gzip"  # forwarded as sent
-        assert json.loads(gzip.decompress(response.read()))["input_tokens"] == FAKE_COUNT_TOKENS_VALUE
+                        headers={"X-Fake-Response-Encoding": encoding})
+        assert response.headers.get("Content-Encoding") == encoding  # forwarded as sent
+        assert json.loads(decode(response.read()))["input_tokens"] == FAKE_COUNT_TOKENS_VALUE
     finally:
         recorder.stop()
     (record,) = records(tmp_path)
     assert record["count_tokens"] == FAKE_COUNT_TOKENS_VALUE
+    assert record["count_tokens_note"] is None
+    digest = summarize(tmp_path / "cap.jsonl", ("Bash",))
+    assert (digest["count_tokens_calls"], digest["count_tokens_unread"]) == (1, 0)
+
+
+def test_undecodable_response_encoding_is_an_unread_call_never_an_absent_one(tmp_path, fake_api_upstream):
+    recorder = ApiSurfaceRecorder(tmp_path / "cap.jsonl", fake_api_upstream)
+    base = recorder.start()
+    try:
+        post(base, "/v1/messages/count_tokens", {"model": "m-1", "messages": []},
+             headers={"X-Fake-Response-Encoding": "x-no-such-codec"})
+    finally:
+        recorder.stop()
+    (record,) = records(tmp_path)
+    assert set(record) == COUNT_TOKENS_KEYS
+    assert record["count_tokens"] is None
+    assert "x-no-such-codec" in record["count_tokens_note"]  # the encoding is named
+    digest = summarize(tmp_path / "cap.jsonl", ("Bash",))
+    assert digest["count_tokens_calls"] == 1
+    assert digest["count_tokens_unread"] == 1
+
+
+def test_brotli_request_body_is_measured_decompressed(tmp_path, fake_api_upstream):
+    payload = {"model": "m-1", "tools": [{"name": "mcp__s__t"}], "messages": [{"role": "user", "content": "B" * 5000}]}
+    serialized = json.dumps(payload).encode()
+    recorder = ApiSurfaceRecorder(tmp_path / "cap.jsonl", fake_api_upstream)
+    base = recorder.start()
+    try:
+        request = urllib.request.Request(base + "/v1/messages", data=brotli.compress(serialized),
+                                         headers={"Content-Type": "application/json",
+                                                  "Content-Encoding": "br"}, method="POST")
+        urllib.request.urlopen(request, timeout=30)
+    finally:
+        recorder.stop()
+    (record,) = records(tmp_path)
+    assert (record["body_bytes"], record["body_bytes_basis"], record["content_encoding"]) == (
+        len(serialized), "decompressed", "br")
+    assert record["tool_names"] == ["mcp__s__t"]
 
 
 def test_count_tokens_absent_scalar_is_null_with_the_reason(tmp_path, fake_api_upstream):
@@ -305,4 +350,5 @@ def test_summarize_digest_and_disallowed_detection(tmp_path):
     # Pre-2026-09 records (no basis field) all parsed, so they read as readable.
     assert digest["requests_readable"] == 2
     assert digest["count_tokens_calls"] == 0
+    assert digest["count_tokens_unread"] == 0
     assert summarize(tmp_path / "missing.jsonl", ("Bash",)) is None

@@ -23,8 +23,12 @@ Response bodies are read only through ``RESPONSE_SCALAR_ALLOWLIST``: named scala
 extractions, one per allowlisted endpoint, recorded on that request's own line. The
 allowlist has exactly one entry -- ``count_tokens``, the numeric token count a
 count-tokens endpoint returns, present only when the driver itself made that call.
-Growing it is a spec commit (10-harness.md), never an implementation convenience.
-Every other response is forwarded without being looked at.
+Extraction decodes whatever response encoding the driver negotiated; an encoding
+the recorder cannot decode leaves the scalar null with the encoding named in
+``count_tokens_note`` and is counted in the digest as ``count_tokens_unread`` --
+a failed read is never recorded as an absent call (DR-3). Growing the allowlist is
+a spec commit (10-harness.md), never an implementation convenience. Every other
+response is forwarded without being looked at.
 
 Forwarding is streaming (chunked pass-through), so SSE responses reach the driver as
 they arrive; the proxy must never change the timing shape enough to alter driver
@@ -37,6 +41,20 @@ import gzip
 import json
 import threading
 import zlib
+
+import brotli
+
+try:  # zstd: stdlib on 3.14+, the zstandard package otherwise; optional either way
+    from compression import zstd as _zstd  # type: ignore[import-not-found]
+    def _zstd_decompress(data: bytes) -> bytes:
+        return _zstd.decompress(data)
+except ImportError:  # pragma: no cover - depends on the interpreter
+    try:
+        import zstandard as _zstandard  # type: ignore[import-not-found]
+        def _zstd_decompress(data: bytes) -> bytes:
+            return _zstandard.ZstdDecompressor().decompressobj().decompress(data)
+    except ImportError:
+        _zstd_decompress = None  # type: ignore[assignment]
 from datetime import datetime, timezone
 from http.client import HTTPConnection, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -106,24 +124,32 @@ def _allowlist_entry(path: str) -> str | None:
 
 
 def _decode_body(body: bytes, content_encoding: str | None) -> bytes | None:
-    """Undo a gzip/deflate content-encoding; None when the encoding cannot be undone.
+    """Undo the negotiated content-encoding; None when it cannot be undone.
 
-    Only stdlib codecs: br/zstd bodies stay opaque and are recorded at wire size with
-    the encoding named, per the contract. A mislabeled identity body (declared gzip,
-    actually plain JSON) also comes back None here and is then tried as-is.
+    The recorder never narrows the driver's Accept-Encoding (that would modify
+    traffic), so it must decode whatever the driver negotiates: gzip, deflate, brotli
+    (DR-3, 2026-09-16 -- the encoding the upstream actually answered every observed
+    count-tokens call with), and zstd where a codec is importable. Anything else
+    stays opaque: recorded at wire size with the encoding named, per the contract. A
+    mislabeled identity body (declared gzip, actually plain JSON) also comes back
+    None here and is then tried as-is.
     """
     encoding = (content_encoding or "identity").strip().lower()
     try:
         if encoding in ("identity", ""):
             return body
-        if encoding == "gzip" or encoding == "x-gzip":
+        if encoding in ("gzip", "x-gzip"):
             return gzip.decompress(body)
         if encoding == "deflate":
             try:
                 return zlib.decompress(body)
             except zlib.error:
                 return zlib.decompress(body, -zlib.MAX_WBITS)  # raw deflate, seen in the wild
-    except (OSError, EOFError, zlib.error, ValueError):
+        if encoding == "br":
+            return brotli.decompress(body)
+        if encoding == "zstd" and _zstd_decompress is not None:
+            return _zstd_decompress(body)
+    except (OSError, EOFError, zlib.error, brotli.error, ValueError):
         return None
     return None
 
@@ -411,4 +437,8 @@ def summarize(record_file: Path, disallowed: tuple[str, ...]) -> dict | None:
         # How many allowlisted count-tokens calls the driver itself made (the scalar
         # lives on those lines as ``count_tokens``); zero when it never called one.
         "count_tokens_calls": sum(1 for r in records if "count_tokens" in r),
+        # Of those, the calls whose scalar could not be read (null on the line, the
+        # note says why -- e.g. an encoding the recorder cannot decode). A failed
+        # read is a call that happened, never an absent call (DR-3).
+        "count_tokens_unread": sum(1 for r in records if "count_tokens" in r and r["count_tokens"] is None),
     }

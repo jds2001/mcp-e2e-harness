@@ -312,6 +312,7 @@ def test_context_accounting_lands_in_the_run_artifacts(tmp_path, fake_api_upstre
     assert meta["api_surface"]["requests_recorded"] == 2
     assert meta["api_surface"]["requests_readable"] == 2
     assert meta["api_surface"]["count_tokens_calls"] == 1
+    assert meta["api_surface"]["count_tokens_unread"] == 0
     dest = config.run_dir / "basic" / "A" / "A1"
     lines = sorted((json.loads(line) for line in (dest / "api-surface.jsonl").read_text().splitlines()),
                    key=lambda r: r["seq"])

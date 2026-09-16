@@ -465,7 +465,8 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     if recorder is not None:
         api_surface = summarize(dest / "api-surface.jsonl", driver.disallowed_builtins) or {
             "requests_recorded": 0, "requests_readable": 0, "requests_with_tools": 0,
-            "tool_names_union": [], "disallowed_builtins_on_wire": [], "count_tokens_calls": 0}
+            "tool_names_union": [], "disallowed_builtins_on_wire": [],
+            "count_tokens_calls": 0, "count_tokens_unread": 0}
         api_surface["unparseable_requests"] = recorder.unrecorded_requests
         api_surface["unparseable_encodings"] = sorted(recorder.unrecorded_encodings)
         api_surface["upstream_forward_errors"] = recorder.forward_errors

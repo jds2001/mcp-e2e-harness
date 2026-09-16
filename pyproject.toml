@@ -3,7 +3,9 @@ name = "mcp-e2e-harness"
 version = "0.1.0"
 description = "Generic e2e test harness that drives a model consumer against an arbitrary MCP server and records what happened; it never scores."
 requires-python = ">=3.10"
-dependencies = []
+dependencies = [
+    "brotli>=1.2.0",
+]
 
 [project.scripts]
 mcp-e2e = "mcp_e2e_harness.cli:main"

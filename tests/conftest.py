@@ -115,8 +115,11 @@ def fake_api_upstream():
 
     A count-tokens path (either dialect) answers with the scalar the recorder's
     allowlist extracts, ``{"input_tokens": 1234, ...}``; a request carrying the test
-    header ``X-Fake-Gzip-Response: 1`` gets that reply gzip-encoded, and one carrying
-    ``X-Fake-Status: <code>`` gets that HTTP status instead of 200.
+    header ``X-Fake-Response-Encoding: gzip|br|<anything else>`` gets that reply
+    encoded that way (an unknown name sends the bytes reversed under that
+    Content-Encoding label -- opaque to the recorder, standing in for a codec it
+    lacks), and one
+    carrying ``X-Fake-Status: <code>`` gets that HTTP status instead of 200.
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -133,10 +136,17 @@ def fake_api_upstream():
             else:
                 payload = b'{"ok": true, "from": "fake-upstream"}'
             self.send_response(int(self.headers.get("X-Fake-Status") or 200))
-            if self.headers.get("X-Fake-Gzip-Response") == "1":
-                import gzip
-                payload = gzip.compress(payload)
-                self.send_header("Content-Encoding", "gzip")
+            encoding = self.headers.get("X-Fake-Response-Encoding")
+            if encoding:
+                if encoding == "gzip":
+                    import gzip
+                    payload = gzip.compress(payload)
+                elif encoding == "br":
+                    import brotli
+                    payload = brotli.compress(payload)
+                else:
+                    payload = payload[::-1]
+                self.send_header("Content-Encoding", encoding)
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()
