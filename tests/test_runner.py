@@ -300,6 +300,30 @@ def test_capture_observes_the_wire_surface_on_a_scored_invocation(
     assert not (config.run_dir / "driver-probe").exists()
 
 
+def test_context_accounting_lands_in_the_run_artifacts(tmp_path, fake_api_upstream, monkeypatch):
+    # Q7 (10-harness.md recording contract): per-request body size on every line, and
+    # the count-tokens scalar on exactly the line where the driver called that endpoint.
+    monkeypatch.setenv("FAKE_API_BASE", fake_api_upstream)
+    monkeypatch.setenv("FAKE_COUNT_TOKENS", "1")
+    config = config_for(tmp_path, manifest_data(), capture_drivers())
+    result = run(config)
+    assert result.failures == 0
+    meta = result.results[0]
+    assert meta["api_surface"]["requests_recorded"] == 2
+    assert meta["api_surface"]["requests_readable"] == 2
+    assert meta["api_surface"]["count_tokens_calls"] == 1
+    dest = config.run_dir / "basic" / "A" / "A1"
+    lines = sorted((json.loads(line) for line in (dest / "api-surface.jsonl").read_text().splitlines()),
+                   key=lambda r: r["seq"])
+    messages, count = lines
+    assert messages["path"] == "/v1/messages" and count["path"] == "/v1/messages/count_tokens"
+    for record in lines:
+        assert isinstance(record["body_bytes"], int) and record["body_bytes"] > 0
+        assert record["body_bytes_basis"] == "decompressed"
+    assert "count_tokens" not in messages
+    assert count["count_tokens"] == 1234
+
+
 def test_disallowed_builtin_on_the_wire_is_an_instrument_breach(
         tmp_path, fake_api_upstream, monkeypatch):
     monkeypatch.setenv("FAKE_API_BASE", fake_api_upstream)

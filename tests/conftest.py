@@ -106,9 +106,18 @@ def fake_drivers() -> dict[str, Driver]:
     return {"fake": FakeDriver()}
 
 
+FAKE_COUNT_TOKENS_VALUE = 1234
+
+
 @pytest.fixture()
 def fake_api_upstream():
-    """A stand-in model API for capture tests: accepts anything, returns {"ok": true}."""
+    """A stand-in model API for capture tests: accepts anything, returns {"ok": true}.
+
+    A count-tokens path (either dialect) answers with the scalar the recorder's
+    allowlist extracts, ``{"input_tokens": 1234, ...}``; a request carrying the test
+    header ``X-Fake-Gzip-Response: 1`` gets that reply gzip-encoded, and one carrying
+    ``X-Fake-Status: <code>`` gets that HTTP status instead of 200.
+    """
 
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):  # noqa: ARG002
@@ -118,8 +127,16 @@ def fake_api_upstream():
             length = int(self.headers.get("Content-Length") or 0)
             if length:
                 self.rfile.read(length)
-            payload = b'{"ok": true, "from": "fake-upstream"}'
-            self.send_response(200)
+            if self.path.rstrip("/").endswith(("/count_tokens", "/input_tokens")):
+                payload = json.dumps({"input_tokens": FAKE_COUNT_TOKENS_VALUE,
+                                      "from": "fake-upstream-count"}).encode()
+            else:
+                payload = b'{"ok": true, "from": "fake-upstream"}'
+            self.send_response(int(self.headers.get("X-Fake-Status") or 200))
+            if self.headers.get("X-Fake-Gzip-Response") == "1":
+                import gzip
+                payload = gzip.compress(payload)
+                self.send_header("Content-Encoding", "gzip")
             self.send_header("Content-Type", "application/json")
             self.send_header("Content-Length", str(len(payload)))
             self.end_headers()

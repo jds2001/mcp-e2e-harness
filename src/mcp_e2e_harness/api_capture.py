@@ -8,10 +8,23 @@ zero disclosure -- recording an outgoing request changes nothing in the consumer
 context -- so it runs during scored cells, continuously, unlike a calibration probe.
 Nothing model-mediated sits in the verification path.
 
-What is recorded, per request that carries a ``tools`` array (one JSONL line):
-``seq``, ``at``, ``path``, ``model``, ``tool_names``. Nothing else. Never headers
-(credentials ride there), never message content, never tool schemas. Requests without
-a parseable ``tools`` array are forwarded untouched and counted, not recorded.
+What is recorded, per request that carries a body (one JSONL line): ``seq``,
+``at``, ``path``, ``model``, ``tool_names``, ``tool_source``, ``body_keys``, and -- the
+context-accounting fields (spec 10-harness.md, "The wire recorder's recording
+contract", added 2026-09-02 for measurements such as uscde-mcp's E15) -- ``body_bytes``
+with ``body_bytes_basis`` (``"decompressed"`` when the body parsed, after undoing a
+gzip/deflate content-encoding if present; ``"wire"`` when it did not, in which case
+the size is the raw wire bytes) and ``content_encoding`` (the request's declared
+encoding, null for identity; the one header value the contract names). Never any
+other header (credentials ride there), never message content, never tool schemas.
+Body-less requests (GETs) are forwarded and not recorded.
+
+Response bodies are read only through ``RESPONSE_SCALAR_ALLOWLIST``: named scalar
+extractions, one per allowlisted endpoint, recorded on that request's own line. The
+allowlist has exactly one entry -- ``count_tokens``, the numeric token count a
+count-tokens endpoint returns, present only when the driver itself made that call.
+Growing it is a spec commit (10-harness.md), never an implementation convenience.
+Every other response is forwarded without being looked at.
 
 Forwarding is streaming (chunked pass-through), so SSE responses reach the driver as
 they arrive; the proxy must never change the timing shape enough to alter driver
@@ -20,8 +33,10 @@ verbatim.
 """
 from __future__ import annotations
 
+import gzip
 import json
 import threading
+import zlib
 from datetime import datetime, timezone
 from http.client import HTTPConnection, HTTPSConnection
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,6 +78,84 @@ def _extract_tool_names(payload: dict) -> tuple[list[str] | None, str | None]:
             if isinstance(code_mode, dict):
                 return sorted(code_mode.keys()), "code_mode_tool_names"
     return None, None
+
+
+# The response-side allowlist (10-harness.md, recording contract). Entry name ->
+# (endpoint path suffixes, response JSON key holding the numeric scalar). The single
+# entry covers the count-tokens endpoint in both dialects the drivers speak: Anthropic
+# Messages (``/v1/messages/count_tokens``) and OpenAI Responses
+# (``/v1/responses/input_tokens``); both return the count under ``input_tokens``.
+# Adding an entry here without the spec commit that names the endpoint, the scalar,
+# and the measurement that needed it is a contract breach.
+RESPONSE_SCALAR_ALLOWLIST: dict[str, tuple[tuple[str, ...], str]] = {
+    "count_tokens": (("/v1/messages/count_tokens", "/v1/responses/input_tokens"), "input_tokens"),
+}
+
+# Buffering cap for an allowlisted response: the scalar responses are a few dozen
+# bytes; anything past this is not the endpoint we think it is.
+_ALLOWLISTED_RESPONSE_CAP = 1 << 20
+
+
+def _allowlist_entry(path: str) -> str | None:
+    """The allowlist entry an endpoint path falls under, or None (the common case)."""
+    bare = path.split("?")[0].rstrip("/")
+    for name, (suffixes, _key) in RESPONSE_SCALAR_ALLOWLIST.items():
+        if any(bare.endswith(suffix) for suffix in suffixes):
+            return name
+    return None
+
+
+def _decode_body(body: bytes, content_encoding: str | None) -> bytes | None:
+    """Undo a gzip/deflate content-encoding; None when the encoding cannot be undone.
+
+    Only stdlib codecs: br/zstd bodies stay opaque and are recorded at wire size with
+    the encoding named, per the contract. A mislabeled identity body (declared gzip,
+    actually plain JSON) also comes back None here and is then tried as-is.
+    """
+    encoding = (content_encoding or "identity").strip().lower()
+    try:
+        if encoding in ("identity", ""):
+            return body
+        if encoding == "gzip" or encoding == "x-gzip":
+            return gzip.decompress(body)
+        if encoding == "deflate":
+            try:
+                return zlib.decompress(body)
+            except zlib.error:
+                return zlib.decompress(body, -zlib.MAX_WBITS)  # raw deflate, seen in the wild
+    except (OSError, EOFError, zlib.error, ValueError):
+        return None
+    return None
+
+
+def _parse_json_object(body: bytes, content_encoding: str | None) -> tuple[dict | None, bytes | None]:
+    """(payload, decoded bytes) for a JSON-object body; (None, None) when unparseable."""
+    candidates = [_decode_body(body, content_encoding)]
+    if candidates[0] is None or candidates[0] is not body:
+        candidates.append(body)  # a mislabeled or unknown encoding may still be plain JSON
+    for decoded in candidates:
+        if decoded is None:
+            continue
+        try:
+            payload = json.loads(decoded)
+        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
+            continue
+        if isinstance(payload, dict):
+            return payload, decoded
+    return None, None
+
+
+def _extract_scalar(response_body: bytes, content_encoding: str | None,
+                    key: str) -> tuple[int | float | None, str | None]:
+    """The allowlisted numeric scalar from a response body; (None, why) when absent."""
+    payload, _decoded = _parse_json_object(response_body, content_encoding)
+    if payload is None:
+        return None, ("response body not parseable as a JSON object "
+                      f"(encoding: {content_encoding or 'identity'})")
+    value = payload.get(key)
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None, f"response carries no numeric {key!r}"
+    return value, None
 
 
 # Hop-by-hop headers; everything else is forwarded verbatim in both directions.
@@ -129,8 +222,8 @@ class ApiSurfaceRecorder:
 
     # ---------------------------------------------------------------- recording
 
-    def _record(self, path: str, body: bytes, content_encoding: str | None) -> None:
-        """One JSONL line per parseable request -- tool-less requests included.
+    def _record(self, path: str, body: bytes, content_encoding: str | None) -> dict | None:
+        """One JSONL line per request that carries a body; unparseable bodies included.
 
         A request with no ``tools`` array is recorded with ``tool_names: null``
         (measured 2026-09-01: codex sends tool-less requests as part of a working
@@ -139,31 +232,50 @@ class ApiSurfaceRecorder:
         a driver failure). ``body_keys`` names the request's top-level keys so an
         alternate tool-delivery channel is visible; still never headers, message
         content, or schemas.
+
+        Context accounting (spec, 2026-09-02): every record carries ``body_bytes``.
+        A body that parses (after undoing gzip/deflate) is measured decompressed --
+        the serialized size that actually enters the model's context -- and marked
+        ``body_bytes_basis: "decompressed"``; one that does not is still recorded,
+        at wire size with ``body_bytes_basis: "wire"`` and its ``content_encoding``
+        named, and counted in ``unrecorded_requests``/``unrecorded_encodings`` so the
+        runner can say the surface went unread for it.
+
+        Returns the record when its endpoint is on the response allowlist -- the
+        line is then written by the caller once the response has been seen -- and
+        None after writing it immediately otherwise. ``seq`` is assigned here, at
+        request arrival, either way.
         """
-        try:
-            payload = json.loads(body)
-            if not isinstance(payload, dict):
-                raise ValueError
-        except (json.JSONDecodeError, UnicodeDecodeError, ValueError):
-            with self._lock:
-                self.unrecorded_requests += 1
-                self.unrecorded_encodings.add(content_encoding or "identity")
-            return
-        names, source = _extract_tool_names(payload)
+        payload, decoded = _parse_json_object(body, content_encoding)
         with self._lock:
             self._seq += 1
-            line = json.dumps({
-                "seq": self._seq,
-                "at": datetime.now(timezone.utc).isoformat(),
-                "path": path.split("?")[0],
-                "model": payload.get("model"),
-                "tool_names": names,
-                "tool_source": source,
-                "body_keys": sorted(payload.keys()),
-            })
-            with open(self.record_file, "a", encoding="utf-8") as handle:
-                handle.write(line + "\n")
-                handle.flush()
+            seq = self._seq
+            if payload is None:
+                self.unrecorded_requests += 1
+                self.unrecorded_encodings.add(content_encoding or "identity")
+        record = {
+            "seq": seq,
+            "at": datetime.now(timezone.utc).isoformat(),
+            "path": path.split("?")[0],
+            "model": payload.get("model") if payload is not None else None,
+            "tool_names": None,
+            "tool_source": None,
+            "body_keys": sorted(payload.keys()) if payload is not None else None,
+            "body_bytes": len(decoded) if decoded is not None else len(body),
+            "body_bytes_basis": "decompressed" if decoded is not None else "wire",
+            "content_encoding": content_encoding or None,
+        }
+        if payload is not None:
+            record["tool_names"], record["tool_source"] = _extract_tool_names(payload)
+        if _allowlist_entry(path) is not None:
+            return record
+        self._write(record)
+        return None
+
+    def _write(self, record: dict) -> None:
+        with self._lock, open(self.record_file, "a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record) + "\n")
+            handle.flush()
 
     # ---------------------------------------------------------------- forwarding
 
@@ -186,8 +298,10 @@ class ApiSurfaceRecorder:
 
     def _proxy(self, handler: BaseHTTPRequestHandler) -> None:
         body = self._read_body(handler)
+        pending: dict | None = None  # an allowlisted request's record, awaiting its scalar
         if body:
-            self._record(handler.path, body, handler.headers.get("Content-Encoding"))
+            pending = self._record(handler.path, body, handler.headers.get("Content-Encoding"))
+        entry = _allowlist_entry(handler.path) or ""
 
         conn_cls = HTTPSConnection if self.upstream.scheme == "https" else HTTPConnection
         conn = conn_cls(self.upstream.netloc, timeout=600)
@@ -207,7 +321,13 @@ class ApiSurfaceRecorder:
             handler.send_header("Content-Length", str(len(message)))
             handler.end_headers()
             handler.wfile.write(message)
+            if pending is not None:
+                self._finish_allowlisted(pending, entry, None, None, None, "upstream unreachable")
             return
+        # Only an allowlisted endpoint's response is buffered -- every other response
+        # streams through untouched and unread.
+        buffered: bytearray | None = bytearray() if pending is not None else None
+        overflow = False
         try:
             handler.send_response(resp.status)
             for key, value in resp.getheaders():
@@ -219,6 +339,11 @@ class ApiSurfaceRecorder:
                 chunk = resp.read(8192)
                 if not chunk:
                     break
+                if buffered is not None:
+                    if len(buffered) + len(chunk) <= _ALLOWLISTED_RESPONSE_CAP:
+                        buffered += chunk
+                    else:
+                        overflow = True
                 handler.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
                 handler.wfile.flush()
             handler.wfile.write(b"0\r\n\r\n")
@@ -226,10 +351,40 @@ class ApiSurfaceRecorder:
             pass  # driver hung up mid-stream; nothing to salvage
         finally:
             conn.close()
+            if pending is not None:
+                self._finish_allowlisted(
+                    pending, entry, resp.status, bytes(buffered or b""),
+                    resp.getheader("Content-Encoding"),
+                    f"response exceeded {_ALLOWLISTED_RESPONSE_CAP} bytes" if overflow else None)
+
+    def _finish_allowlisted(self, record: dict, entry: str, status: int | None,
+                            response_body: bytes | None, content_encoding: str | None,
+                            note: str | None) -> None:
+        """Attach the allowlisted scalar (or why it is absent) and write the held line.
+
+        The scalar lands under the entry's name (``count_tokens``), with
+        ``<entry>_note`` null on success and naming the reason otherwise -- a call the
+        driver made is always visible as such, even when the count could not be read.
+        """
+        key = RESPONSE_SCALAR_ALLOWLIST[entry][1]
+        value = None
+        if note is None:
+            if status is not None and status >= 400:
+                note = f"upstream answered HTTP {status}"
+            else:
+                value, note = _extract_scalar(response_body or b"", content_encoding, key)
+        record[entry] = value
+        record[f"{entry}_note"] = note
+        self._write(record)
 
 
 def summarize(record_file: Path, disallowed: tuple[str, ...]) -> dict | None:
-    """Digest a capture file into the meta-record shape; None when nothing captured."""
+    """Digest a capture file into the meta-record shape; None when nothing captured.
+
+    ``requests_recorded`` counts every line, unparseable (wire-basis) ones included;
+    ``requests_readable`` counts the lines whose body parsed -- the ones on which a
+    tool surface could have been read at all.
+    """
     if not record_file.exists():
         return None
     records = []
@@ -239,6 +394,8 @@ def summarize(record_file: Path, disallowed: tuple[str, ...]) -> dict | None:
                 records.append(json.loads(line))
             except json.JSONDecodeError:
                 continue
+    # Pre-2026-09 capture files carry no basis field; every line in them parsed.
+    readable = [r for r in records if r.get("body_bytes_basis", "decompressed") != "wire"]
     with_tools = [r for r in records if r.get("tool_names") is not None]
     union: list[str] = []
     for record in with_tools:
@@ -247,7 +404,11 @@ def summarize(record_file: Path, disallowed: tuple[str, ...]) -> dict | None:
                 union.append(name)
     return {
         "requests_recorded": len(records),
+        "requests_readable": len(readable),
         "requests_with_tools": len(with_tools),
         "tool_names_union": union,
         "disallowed_builtins_on_wire": [n for n in disallowed if n in union],
+        # How many allowlisted count-tokens calls the driver itself made (the scalar
+        # lives on those lines as ``count_tokens``); zero when it never called one.
+        "count_tokens_calls": sum(1 for r in records if "count_tokens" in r),
     }

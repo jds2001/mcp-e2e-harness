@@ -54,6 +54,14 @@ def main() -> int:
                                          headers={"Content-Type": "application/json"},
                                          method="POST")
         urllib.request.urlopen(request, timeout=30).read()
+        if os.environ.get("FAKE_COUNT_TOKENS"):
+            # A driver-made count-tokens call: the recorder's one allowlisted response
+            # scalar lands on this request's own line, nowhere else.
+            body = json.dumps({"model": "fake-model-1", "messages": []}).encode()
+            request = urllib.request.Request(base + "/v1/messages/count_tokens", data=body,
+                                             headers={"Content-Type": "application/json"},
+                                             method="POST")
+            urllib.request.urlopen(request, timeout=30).read()
 
     if "NO NETWORK ACCESS" in prompt:
         # The egress canary. FAKE_EGRESS_OPEN simulates a sandbox that let the
