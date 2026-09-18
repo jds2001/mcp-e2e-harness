@@ -97,6 +97,33 @@ A codex cell is three manifest fields — `"driver": "codex"`, a codex model id,
 - **Role and gating**: give codex cells a `cross-vendor-*` role; whether they gate is your suite's decision like any cell (S11 in the harness spec). The one hard rule is substitution, not gating: a cross-vendor cell never stands in for a gating cell of your primary vendor.
 - **Version sensitivity**: the codex driver contract is verified against a pinned codex-cli version (see the harness repo's `50-drivers.md`); on a different local version the harness re-verifies before attribution cells run — expect that, don't fight it.
 
+### Real floor models with the `loop` driver (OpenRouter)
+
+The `loop` driver (`50-drivers.md`) puts the harness's own minimal agent loop in front of any OpenRouter model, so the floor role can be a cheap open-weight model rather than whatever the product CLIs expose. It measures **server × model under the harness scaffold**, a different thing from the product-driver cells, and never pools with them (S11). Selecting models is your call; these are the constraints and a dated starting roster.
+
+**Eligibility is per endpoint, not per model id (S12).** OpenRouter's model-level "supports tools" flag is not enough: on 2026-09-18, 5 of the 24 endpoints serving `openai/gpt-oss-120b` did not advertise tools, and quantization on the rest ranged bf16 to fp4. Read the endpoint listing (`GET /api/v1/models/<id>/endpoints`, free) before pinning, and pin a merge-gating loop cell. A pin candidate must: advertise `tools` on that endpoint; state its quantization, or be the model's first party; show a healthy status; and survive the driver's data-policy preference. The harness's calibration probe then confirms the pair actually calls a tool before any scored turn runs.
+
+**What the ranking you may have seen means.** OpenRouter's category rankings ("top legal model" and so on) are usage share by tokens, not accuracy; the page is client-rendered and was not machine-readable to the spec session, so the standing is a maintainer report here. Popularity is a good reason to *include* a model in the floor — a floor should be what real consumers use — and no reason to trust its answers; the suite measures that.
+
+**Starting roster (catalog snapshot 2026-09-18; list price $/M input / output; endpoints total / advertising tools).** Re-read the catalog before authoring; this table will be stale.
+
+| role | model id | $/M in / out | endpoints (tools) | notes |
+|---|---|---|---|---|
+| floor, open-weight | `openai/gpt-oss-120b` | 0.15 / 0.60 | 24 (19) | the maintainer's pick; **pin** — bf16 endpoints with tools existed at $0.03–0.04 (AkashML, DekaLLM, DeepInfra); reasoning cannot be disabled, use `{"reasoning": {"effort": "low"}}` |
+| floor, second lineage | `deepseek/deepseek-v4-flash` | 0.048 / 0.097 | 16 (16) | fp8 everywhere; a non-OpenAI lineage so the floor is not one family |
+| floor, second lineage (alt) | `z-ai/glm-5.3-flash` | 0.09 / 0.30 | 29 (29) | first party is `z-ai/fp8` at 0.15 / 0.50 |
+| floor, no pin question | `qwen/qwen3.7-flash` | 0.03 / 0.13 | 1 (1) | single first-party endpoint |
+| floor, no pin question | `mistralai/mistral-small-2603` | 0.15 / 0.60 | 3 (3) | first party only, a zero-retention tag exists |
+| capability-floor | `openai/gpt-oss-20b` | 0.03 / 0.13 | 13 (9) | pin; bf16 with tools at DekaLLM/DeepInfra ~0.03 |
+| vendor mid-tier (optional) | `openai/gpt-5.4-nano` | 0.20 / 1.25 | 4 (4) | first party; the cheapest current OpenAI tier |
+| vendor mid-tier (optional) | `google/gemini-3.5-flash-lite` | 0.30 / 2.50 | 8 (8) | first party |
+| avoid | `meta-llama/llama-4-maverick` | 0.19 / 0.65 | 5 (3) | tools on a minority of endpoints, no reasoning knob |
+| avoid | any `:free` id | 0 | — | rate-limited, and the free tier is where prompt logging concentrates |
+
+Start with two or three: the maintainer's pick pinned, one second-lineage floor, and the capability-floor. Grow on a question, never on curiosity (`10-harness.md`, grid grows on need).
+
+**Cost, so you can set the cap before the first run.** Measured request sizes from a real C1 run give ~200k input tokens per crowded floor invocation and ~20–45k per fresh one (`50-drivers.md` → loop, cost model). At the $0.15/M tier a 40-invocation pass (20 prompts × floor + isolation) is about $1; at the cheapest pinned endpoints about $0.25; at the $1/M vendor tier about $10. The unbounded terms are reasoning tokens at higher effort and runaway tool loops, which the driver's budget cap and the scaffold's step cap exist for. Set `budget_usd` per cell or the run-level cap, and read the pre-run estimate the runner prints.
+
 ## Checks (Layer 1) — mechanical trace conformance
 
 Declarative rules the harness evaluates over every trace record: this is where your server's *published tool contract* gets asserted (error envelopes, truncation markers, disambiguation totals, provenance fields — whatever your server promises). Selectors match records by tool name and pointer predicates; assertions are `present` / `absent` / `matches` / `not_matches` / `enum` / `forbid_pattern`, combined with `all_of` / `any_of` / `not`. Pointers are RFC 6901, with `~each` to quantify over arrays.

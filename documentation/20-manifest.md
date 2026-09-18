@@ -51,6 +51,22 @@ A map of cell id → cell. Fields:
 
 The ancestor's `cache: {mode: cold}` semantics — a fresh, empty state directory per invocation — generalize to: **the harness always provides a fresh neutral working directory and fresh server process per cell invocation**; any state carried in must arrive via `setup` or `env`, explicitly. There is no warm-by-accident.
 
+### Loop-driver cells (`driver: "loop"`) — schema frozen 2026-09-18
+
+The concrete consumer that the 2026-09-11 deferral waited for is the maintainer's own floor use (real floor models on OpenRouter); the schema is frozen on that. The common fields above apply unchanged; a loop cell adds or constrains these:
+
+| field | required | what |
+|---|---|---|
+| `endpoint` | yes | a **named deployment**, currently only `openrouter`. The base URL and the credential (`OPENROUTER_API_KEY` from the harness's environment) are harness configuration, never manifest content — a manifest carries no hosts and no secrets. A direct-vendor deployment is a further name added here when a suite needs it |
+| `model` | yes | the deployment's model id verbatim (`openai/gpt-oss-120b`). No routing-shortcut suffixes (`:free` and kin): a suffix is a routing preference, not an identity, and routing is expressed in `provider` |
+| `provider` | no | an endpoint tag verbatim from the deployment's endpoint listing (`deepinfra/bf16`). Present: the driver sends it as the sole allowed provider with fallbacks disabled and `require_parameters` set, the pin joins cell identity, and a served-provider mismatch BREAKS the cell (`50-drivers.md` → loop, requirement 4). Absent: the cell is unpinned and every row it produces carries `reproducibility: unpinned` |
+| `scaffold` | yes | the harness loop scaffold, `name@version`, pinned by content hash in `40-instruments.md`; joins cell identity like a crowding procedure does |
+| `knobs` | yes | the deployment's request fields verbatim — for OpenRouter the unified `reasoning` object (`{"effort": "low"}`), `temperature`, `max_tokens`, and so on. Never translated to another vendor's scale (`10-harness.md`). A floor-role reasoning model carries its **minimum** effort here, since most cannot switch reasoning off; whether the knob is honored is Q8 P-knob-drop territory until measured |
+| `data_policy` | no | `deny` (default) or `allow`; `allow` is the recorded opt-out of requirement 7's provider preference |
+| `budget_usd` | no | a per-cell spend cap; the run-level cap is harness configuration (requirement 6). Either cap stopping the run is a surfaced run-level outcome |
+
+`tool_surface` for a loop cell is constructed by the harness from the server's advertised tools, so `"full"` and a list have exactly the S7 meaning: the wire tools array must equal the surface on every scored request.
+
 ## `prompts`
 
 | field | required | what |
