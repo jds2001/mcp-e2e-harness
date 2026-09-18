@@ -12,6 +12,7 @@ This directory is the spec for a harness that drives a model consumer against an
 - `codex-driver-handoff.md` — external measurements from the uscode-mcp spec session (verbatim, provenance for the codex entry in `50-drivers.md`).
 - `openrouter-probe-2026-09-18.md` — the spec session's own external probe of the OpenRouter roster (method, served providers, the knob silent-swallow observation); informs Q8 without settling it.
 - `90-open-questions.md` — open questions; route answers per `CLAUDE.md`.
+- `work-orders/` — numbered work orders from the spec session to the implementation session (started 2026-09-18 at the maintainer's request). Each states deliverables, acceptance as observable artifacts, and what to report; the maintainer may challenge a defective one. A work order is derived from the spec and never overrides it — on conflict the spec files win and the work order is corrected.
 - `examples/congressmcp/` — the ancestor suite from congressMCP, kept verbatim as the worked example. Not normative; see its README for what is server-specific and where it deviates from `20-manifest.md`.
 
 ## Conventions — these bind
