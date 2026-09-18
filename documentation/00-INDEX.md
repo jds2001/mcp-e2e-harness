@@ -10,6 +10,7 @@ This directory is the spec for a harness that drives a model consumer against an
 - `40-instruments.md` — the registry of pinned instrument content (crowding procedures, by name/version/content hash); crowded runs are scoreable only against a pin listed there.
 - `50-drivers.md` — per-driver attribution contracts: how each driver meets the `10-harness.md` obligations, version-pinned; drivers absent from it host no attribution-dependent scoring.
 - `codex-driver-handoff.md` — external measurements from the uscode-mcp spec session (verbatim, provenance for the codex entry in `50-drivers.md`).
+- `openrouter-probe-2026-09-18.md` — the spec session's own external probe of the OpenRouter roster (method, served providers, the knob silent-swallow observation); informs Q8 without settling it.
 - `90-open-questions.md` — open questions; route answers per `CLAUDE.md`.
 - `examples/congressmcp/` — the ancestor suite from congressMCP, kept verbatim as the worked example. Not normative; see its README for what is server-specific and where it deviates from `20-manifest.md`.
 

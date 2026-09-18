@@ -115,12 +115,12 @@ The `loop` driver (`50-drivers.md`) puts the harness's own minimal agent loop in
 | floor, no pin question | `qwen/qwen3.7-flash` | 0.03 / 0.13 | 1 (1) | single first-party endpoint |
 | floor, no pin question | `mistralai/mistral-small-2603` | 0.15 / 0.60 | 3 (3) | first party only, a zero-retention tag exists |
 | capability-floor | `openai/gpt-oss-20b` | 0.03 / 0.13 | 13 (9) | pin; bf16 with tools at DekaLLM/DeepInfra ~0.03 |
-| vendor mid-tier (optional) | `openai/gpt-5.4-nano` | 0.20 / 1.25 | 4 (4) | first party; the cheapest current OpenAI tier |
+| vendor mid-tier (optional) | `openai/gpt-5.4-nano` | 0.20 / 1.25 | 4 (4) | first party; the cheapest current OpenAI tier. **No `temperature` knob** — the strict pin refuses it (probed 2026-09-18) |
 | vendor mid-tier (optional) | `google/gemini-3.5-flash-lite` | 0.30 / 2.50 | 8 (8) | first party |
 | avoid | `meta-llama/llama-4-maverick` | 0.19 / 0.65 | 5 (3) | tools on a minority of endpoints, no reasoning knob |
 | avoid | any `:free` id | 0 | — | rate-limited, and the free tier is where prompt logging concentrates |
 
-Start with two or three: the maintainer's pick pinned, one second-lineage floor, and the capability-floor. Grow on a question, never on curiosity (`10-harness.md`, grid grows on need).
+Every row above except the `:free` line was probed on 2026-09-18 and returned a well-formed tool call at the stated pin (`openrouter-probe-2026-09-18.md`; the whole probe cost under a cent). Start with two or three: the maintainer's pick pinned, one second-lineage floor, and the capability-floor. Grow on a question, never on curiosity (`10-harness.md`, grid grows on need).
 
 **Cost, so you can set the cap before the first run.** Measured request sizes from a real C1 run give ~200k input tokens per crowded floor invocation and ~20–45k per fresh one (`50-drivers.md` → loop, cost model). At the $0.15/M tier a 40-invocation pass (20 prompts × floor + isolation) is about $1; at the cheapest pinned endpoints about $0.25; at the $1/M vendor tier about $10. The unbounded terms are reasoning tokens at higher effort and runaway tool loops, which the driver's budget cap and the scaffold's step cap exist for. Set `budget_usd` per cell or the run-level cap, and read the pre-run estimate the runner prints.
 
