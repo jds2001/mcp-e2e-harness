@@ -1,6 +1,6 @@
 # `answer-coverage@1` reference vectors
 
-The rows behind the reference-vector table in `documentation/40-instruments.md` (2026-09-18, spec session), copied here so the vectors survive the gitignored run directories. `tests/test_measurements.py` asserts every value in that table against these files.
+The rows behind the reference-vector table in `documentation/40-instruments.md` (2026-09-18, spec session; five `furthest_offset` cells corrected 2026-09-19), copied here so the vectors survive the gitignored run directories. `tests/test_measurements.py` asserts every value in that table against these files.
 
 - `*.answer.txt` — each row's `answer.txt`, byte for byte: model output from our own runs.
 - `PLAW-118publ31.window-0-20000.reference.txt` — the `get_public_law` record's `/response/structuredContent/text/content` string for the four loop rows (identical across them: the same 20,000-character window of the same law). Public-law text is public domain.

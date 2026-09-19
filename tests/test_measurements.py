@@ -2,7 +2,8 @@
 
 The reference vectors here are the spec session's table in 40-instruments.md, copied
 verbatim into tests/fixtures/answer-coverage/. A vector that does not reproduce is a
-method-conformance defect to report, never a number to adjust (WO-4 section 4).
+method-conformance defect to report, never a number to adjust (WO-4 section 4; the
+table's five furthest_offset cells were corrected by the spec session under WO-5).
 """
 from __future__ import annotations
 
@@ -25,23 +26,6 @@ VECTORS = json.loads((FIXTURES / "vectors.json").read_text(encoding="utf-8"))
 # as embedded, joined by "\n" with no trailing newline. If the embedded text ever
 # drifts from this, the failure must be loud here.
 REPORTED_METHOD_HASH = "211931382f74e072f2c2af8c77e678660f45efa4cd2082b8d9e25b2fd4be2d6a"
-
-# The one discrepancy found against the table (WO-4 section 4: reported, not
-# adjusted). On three vector rows the furthest span ends on a collapsed whitespace run
-# ("\n\n" before "[[Page 1..." at raw 6764-6765; "\n\n    " before "(a)" at raw
-# 1041-1046). The method text's "one past the last character of the span" in raw
-# coordinates is one past that run: 6766 and 1047. The table says 6767 and 1048 --
-# one past the run, plus one more -- consistent with a reference implementation
-# whose offset map sent a collapsed space to the raw index *after* its run. Every
-# other value on every row, including furthest_offset on spans that end on a
-# non-whitespace character (19958), reproduces exactly.
-DISCREPANT_FURTHEST_OFFSET = {  # (slug, floor) -> (table value, value this implementation records)
-    ("pinned-r09", 64): (6767, 6766),
-    ("pinned-r09", 40): (6767, 6766),
-    ("floor-crowded", 64): (6767, 6766),
-    ("unpinned-r01", 64): (1048, 1047),
-    ("unpinned-r01", 40): (1048, 1047),
-}
 
 VALUE_KEYS = ("reference_chars_raw", "reference_chars_normalized", "answer_chars_raw", "floor",
               "spans", "matched_chars", "furthest_offset", "share")
@@ -83,27 +67,12 @@ def test_reference_vectors_reproduce(vector):
     """Every value in the 40-instruments.md table, exactly (the floor-40 rows and the zero-span row included)."""
     answer, reference = _row(vector)
     got = m.answer_coverage(answer, reference, vector["floor"]).record()
-    expected = {k: vector[k] for k in VALUE_KEYS}
-    key = (vector["slug"], vector["floor"])
-    if key in DISCREPANT_FURTHEST_OFFSET:
-        table_value, ours = DISCREPANT_FURTHEST_OFFSET[key]
-        assert expected["furthest_offset"] == table_value, "vectors.json drifted from the recorded discrepancy"
-        expected["furthest_offset"] = ours
-    assert got == expected
+    assert got == {k: vector[k] for k in VALUE_KEYS}
 
 
-@pytest.mark.parametrize("key", sorted(DISCREPANT_FURTHEST_OFFSET), ids=lambda k: f"{k[0]}@floor{k[1]}")
-@pytest.mark.xfail(strict=True, reason="furthest_offset discrepancy against the 40-instruments.md table, "
-                                       "reported under WO-4 section 4; see DISCREPANT_FURTHEST_OFFSET")
-def test_reference_vector_furthest_offset_as_tabled(key):
-    """Strict xfail: flips to a hard failure the moment the table and the method agree, so the pin gets re-checked."""
-    vector = next(v for v in VECTORS["vectors"] if (v["slug"], v["floor"]) == key)
-    answer, reference = _row(vector)
-    assert m.answer_coverage(answer, reference, vector["floor"]).furthest_offset == vector["furthest_offset"]
-
-
-def test_discrepant_spans_end_on_a_collapsed_whitespace_run():
-    # The mechanism behind the discrepancy, pinned as a fact about the rows.
+def test_furthest_span_on_pinned_r09_ends_on_a_collapsed_whitespace_run():
+    # The fact behind the 2026-09-19 table correction (WO-5): the furthest span ends on
+    # the "\n\n" before "[[Page 137", so one past it in raw coordinates is 6766.
     vector = next(v for v in VECTORS["vectors"] if (v["slug"], v["floor"]) == ("pinned-r09", 64))
     answer, reference = _row(vector)
     cov = m.answer_coverage(answer, reference, 64)
