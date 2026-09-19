@@ -55,6 +55,11 @@ class TurnContext:
     # by env var, config, or argv, in its own idiom. None on dry runs and for
     # capture-less drivers.
     api_base_url: str | None = None
+    # The manifest cell this turn belongs to, verbatim, for drivers whose contract
+    # adds cell fields beyond the common ones (the loop driver's endpoint, scaffold,
+    # pin, data policy -- 20-manifest.md "Loop-driver cells"). Empty for the
+    # driver-level probes, which have no cell.
+    cell: dict = field(default_factory=dict)
 
 
 class Driver(ABC):
@@ -96,6 +101,15 @@ class Driver(ABC):
     # Whether the driver supports multi-turn sessions (crowding pre-turns). A crowded
     # cell on a driver without sessions is refused at preflight.
     supports_sessions: bool = True
+    # S7 strength. False: the wire check is the disallowed-builtins denylist (product
+    # drivers, whose CLIs add their own harness tools to the array). True: every
+    # recorded tools array must EQUAL the cell's surface exactly -- the loop driver,
+    # whose tools array is constructed by the harness, so any extra name is
+    # endpoint- or router-injected and a breach (50-drivers.md, loop #3).
+    wire_surface_exact: bool = False
+    # S11 family: "product" (third-party consumer harness) or "loop" (harness-owned
+    # loop). Cells never pool across families.
+    family: str = "product"
 
     @property
     def supports_api_capture(self) -> bool:
@@ -130,6 +144,44 @@ class Driver(ABC):
         never from intent -- that the non-server channels are closed; return the
         record of what was verified, in this driver's own vocabulary. Raises
         DriverAttributionError."""
+
+    def wire_tool_name(self, server_name: str, tool_name: str) -> str:
+        """How this driver names a server's tool on the model-API wire, so the runner
+        can state the expected wire surface in the driver's own vocabulary."""
+        return f"mcp__{server_name}__{tool_name}"
+
+    # ---- family hooks: no-ops for product drivers; the loop driver fills them in.
+
+    def cell_marks(self, cell: dict) -> dict | None:  # noqa: ARG002
+        """Identity/family marks every artifact naming this cell must carry (S11);
+        None for drivers whose contract adds none."""
+        return None
+
+    def cell_identity(self, cell: dict) -> list[str]:  # noqa: ARG002
+        """Extra cell-identity components this driver's contract adds (10-harness.md,
+        "Cells": the loop driver adds scaffold version and provider pin)."""
+        return []
+
+    def pre_run(self, cells: dict[str, dict], invocations: dict[str, int],
+                budget_usd: float | None, log) -> dict | None:  # noqa: ARG002
+        """Operator legibility before the first invocation (S9 kin): e.g. the loop
+        driver's invocation count, cost estimate, and data-policy disclosure. Returns
+        a record for run-manifest.json, or None."""
+        return None
+
+    def cell_gate(self, cell_name: str, cell: dict, dest: Path, cache_dir: Path,
+                  log, timeout_s: int, scan: list[str]) -> dict | None:  # noqa: ARG002
+        """A per-cell gate that runs after the spawn check and before any model turn
+        (e.g. the loop driver's calibration probe). None means no gate; otherwise
+        {"ok", "reason", "record", "cost_usd"} -- a not-ok gate BREAKS the cell."""
+        return None
+
+    def after_turn(self, turn: TurnSpec, dest: Path, cell: dict,
+                   api_surface_path: Path, cell_name: str | None = None) -> dict | None:  # noqa: ARG002
+        """Driver-specific reading of the invocation's artifacts after the turn ran:
+        {"record": <lands in meta under the driver's family key>, "breaches": [...],
+        "cost_usd": float}. Any breach voids the cell. None when nothing to add."""
+        return None
 
     def environment_state(self, turn: TurnSpec) -> dict | None:
         """Vendor-pushed state that entered THIS invocation's environment at run time,

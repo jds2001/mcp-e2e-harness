@@ -34,9 +34,9 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import __version__, crowding
+from . import __version__, crowding, distractor
 from . import checks as checks_mod
-from .api_capture import ApiSurfaceRecorder, summarize
+from .api_capture import ApiSurfaceRecorder, read_records, summarize, surface_mismatches
 from .drivers import DRIVERS, Driver
 from .drivers.base import TurnContext
 from .manifest import Manifest
@@ -73,6 +73,15 @@ class RunConfig:
     dry_run: bool = False
     timeout_s: int = DEFAULT_TIMEOUT_S
     drivers: dict[str, Driver] = field(default_factory=lambda: dict(DRIVERS))
+    # Run-level spend cap in USD (50-drivers.md loop #6): summed actual usage.cost
+    # across the run reaching it stops the run cleanly; completed cells stand and the
+    # stop is a run-level outcome. None means no cap. Per-cell caps are the cells'
+    # own ``budget_usd``.
+    budget_usd: float | None = None
+    # Where per-(model, provider, scaffold, driver-version) calibration-probe verdicts
+    # are cached (loop #9); default: a ``loop-probe-cache`` directory beside the run
+    # directory (its parent), so the cache survives the run and is shared by runs.
+    probe_cache_dir: Path | None = None
     # For tests: where neutral cwds are created (must itself be leak-free).
     tmp_base: Path | None = None
     # Operator legibility (ruling S9): the runner is never silent. Every progress
@@ -93,6 +102,9 @@ class RunResult:
     # Cells BROKEN by the S8 spawn liveness gate, with reasons; their prompts were
     # skipped without spending model turns.
     voided_cells: dict[str, str] = field(default_factory=dict)
+    # Budget-cap stops (run-level or per-cell), each a surfaced run-level outcome.
+    budget_stops: list[dict] = field(default_factory=list)
+    spend_usd: float = 0.0
 
 
 def plan_invocations(manifest: Manifest, cells: list[str],
@@ -152,10 +164,46 @@ def resolve_prompt(entry: dict, cell: dict) -> str:
     return text
 
 
-def cell_id_of(cell_name: str, cell: dict) -> str:
+def cell_id_of(cell_name: str, cell: dict, driver: Driver | None = None) -> str:
     surface = cell["tool_surface"]
     surface_tag = "full" if surface == "full" else "surface:" + "+".join(surface)
-    return f"{cell['driver']}/{cell['model']}/{cell['context']}/{surface_tag}"
+    parts = [cell["driver"], cell["model"], cell["context"], surface_tag]
+    # Identity components the driver's contract adds (10-harness.md "Cells": the loop
+    # driver adds scaffold version and provider pin).
+    parts += driver.cell_identity(cell) if driver is not None else []
+    return "/".join(parts)
+
+
+def scan_set_for(config: RunConfig, driver: Driver) -> list[str]:
+    """The secret-hygiene scan set: the manifest's secrets plus the driver's own
+    credentials (``required_env`` values, e.g. the loop's OPENROUTER_API_KEY) -- a
+    harness credential reaching an artifact is the same breach as a suite secret."""
+    scan = collect_scan_set(config.manifest.data)
+    for name in driver.required_env:
+        value = os.environ.get(name, "")
+        if len(value) >= 8 and value not in scan:
+            scan.append(value)
+    return scan
+
+
+def expected_wire_surface(driver: Driver, manifest: Manifest, cell: dict,
+                          advertised_tools: list[str] | None,
+                          procedure: crowding.CrowdingProcedure | None) -> list[str] | None:
+    """The exact tools array a wire_surface_exact driver must send on every request:
+    the cell's surface (the list, or every tool the SUT advertised at the spawn
+    check for ``full``) plus the distractor's tools in a crowded cell, each in the
+    driver's wire naming. None when the surface cannot be stated (no spawn record)."""
+    surface = cell["tool_surface"]
+    if surface == "full":
+        if advertised_tools is None:
+            return None
+        server_tools = list(advertised_tools)
+    else:
+        server_tools = list(surface)
+    names = [driver.wire_tool_name(manifest.server["name"], t) for t in server_tools]
+    if procedure is not None:
+        names += [driver.wire_tool_name(procedure.server_name, t) for t in distractor.tool_names(procedure)]
+    return sorted(names)
 
 
 def _utcnow() -> str:
@@ -313,13 +361,14 @@ def _crowding_preturn(driver: Driver, ctx_base: dict, procedure: crowding.Crowdi
     return record
 
 
-def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]) -> dict:
+def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str],
+            advertised_tools: list[str] | None = None) -> dict:
     manifest = config.manifest
     entry, cell_name, cell = planned.entry, planned.cell_name, planned.cell
     driver = config.drivers[cell["driver"]]
     dest = config.run_dir / cell_name / entry["group"] / entry["id"]
     dest.mkdir(parents=True, exist_ok=True)
-    scan = collect_scan_set(manifest.data)
+    scan = scan_set_for(config, driver)
 
     cwd = make_neutral_cwd(entry["id"], config.tmp_base)
     prompt_text = resolve_prompt(entry, cell)
@@ -362,7 +411,8 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
 
     ctx_base = dict(model=cell["model"], knobs=cell["knobs"],
                     server_name=manifest.server["name"], tool_surface=cell["tool_surface"],
-                    extra_server_names=extra_names, dest=dest, api_base_url=api_base_url)
+                    extra_server_names=extra_names, dest=dest, api_base_url=api_base_url,
+                    cell=cell)
 
     started = _utcnow()
     t0 = time.perf_counter()
@@ -479,6 +529,30 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
                     "disallowed builtin(s) "
                     f"{api_surface['disallowed_builtins_on_wire']} observed in the tools array "
                     "sent to the model -- instrument breach; claims not tool-attributable")
+            elif driver.wire_surface_exact:
+                # S7 in its exact form (50-drivers.md loop #3): the tools array on
+                # EVERY request equals the cell's surface; any extra name is
+                # endpoint- or router-injected, any missing name is a surface the
+                # consumer did not offer. Either way the cell is BROKEN.
+                expected = expected_wire_surface(driver, manifest, cell, advertised_tools, procedure)
+                api_surface["expected_wire_surface"] = expected
+                if expected is None:
+                    api_surface["wire_surface_mismatches"] = None
+                    harness_failure = ("the expected wire surface could not be stated (no spawn "
+                                       "record for a full-surface cell); S7 unverified")
+                else:
+                    records = read_records(dest / "api-surface.jsonl")
+                    mismatches = surface_mismatches(records, expected)
+                    api_surface["wire_surface_mismatches"] = mismatches
+                    if not records:
+                        harness_failure = ("API surface capture recorded zero readable model "
+                                           "requests: the surface is unverified for this invocation")
+                    elif mismatches:
+                        harness_failure = (
+                            f"wire tools array differs from the cell's surface on {len(mismatches)} "
+                            f"request(s) (first: seq {mismatches[0]['seq']}, extra "
+                            f"{mismatches[0]['extra']}, missing {mismatches[0]['missing']}) -- "
+                            "instrument breach; claims not tool-attributable")
             elif api_surface["requests_readable"] == 0:
                 # An answer with zero readable model requests means the driver either
                 # did not route through the capture or sent nothing the recorder could
@@ -499,6 +573,26 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     # fetch) lands mid-invocation, never at build_turn time (50-drivers.md Residual 2).
     environment_state = driver.environment_state(turn) if not config.dry_run else None
 
+    # The driver family's own reading of the invocation's artifacts (the loop
+    # driver: served providers per request against the pin, usage and cost sums,
+    # loop mechanics, the consumer's fail-fast breach). Any breach voids the cell.
+    family_record: dict | None = None
+    breaches: list[str] = []
+    spend_usd: float | None = None
+    if not config.dry_run:
+        extra = driver.after_turn(turn, dest, cell, dest / "api-surface.jsonl", cell_name)
+        if extra is not None:
+            family_record = extra.get("record")
+            breaches = list(extra.get("breaches") or [])
+            spend_usd = extra.get("cost_usd")
+            if breaches and harness_failure is None:
+                harness_failure = breaches[0]
+    if api_surface and api_surface.get("wire_surface_mismatches"):
+        breaches.append("wire tools array differs from the cell's surface (S7 exact)")
+    if api_surface and api_surface.get("disallowed_builtins_on_wire"):
+        breaches.append(f"disallowed builtin(s) on the wire: {api_surface['disallowed_builtins_on_wire']}")
+    marks = driver.cell_marks(cell)
+
     duration = round(time.perf_counter() - t0, 2)
     records, parse_errors = _read_trace(dest / "trace.jsonl")
     if (dest / "trace.jsonl").exists():
@@ -514,8 +608,14 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "prompt_id": entry["id"],
         "group": entry["group"],
         "cell": cell_name,
-        "cell_id": cell_id_of(cell_name, cell),
+        "cell_id": cell_id_of(cell_name, cell, driver),
         "driver": {"id": cell["driver"], "cli_version": driver_versions.get(cell["driver"])},
+        # S11 marks: family, scaffold with hash, pin or unpinned, reproducibility --
+        # present on every artifact naming a loop cell; product-driver cells carry
+        # none of these keys (their contracts add no marks).
+        **({"driver_family": marks["driver_family"], "scaffold": marks["scaffold"],
+            "provider_pin": marks["provider_pin"], "reproducibility": marks["reproducibility"]}
+           if marks else {}),
         "model": cell["model"],
         # The cell's knobs in the driver's native vocabulary, verbatim -- never
         # translated, never defaulted by the harness.
@@ -554,6 +654,14 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         # ran, outside anything the harness configured (e.g. codex's own plugin-sync
         # fetch into CODEX_HOME); null for drivers with nothing of this kind to report.
         "environment_state": environment_state,
+        # Instrument breaches found on this invocation (each voids the cell).
+        "breaches": breaches,
+        # Actual spend on this invocation from the recorder's usage.cost lines
+        # (loop cells); null for drivers that report none.
+        "spend_usd": spend_usd,
+        # The driver family's own record (the loop driver's served providers, usage,
+        # steps, probe, marks); absent for product drivers.
+        **({driver.family: family_record} if family_record is not None else {}),
         "setup": setup_records,
         "crowding": ({"procedure": procedure.name, "version": procedure.version,
                       "content_hash": procedure.content_hash(),
@@ -949,6 +1057,57 @@ def probe_egress(driver: Driver, dest: Path, *, model: str | None = None,
     return record
 
 
+def probe_loop_cells(manifest: Manifest, cells: list[str], out: Path, *, timeout_s: int = DEFAULT_TIMEOUT_S,
+                     cache_dir: Path | None = None, drivers: dict[str, Driver] | None = None,
+                     log: Callable[[str], None] = _print_log) -> dict[str, dict]:
+    """Run the loop calibration probe (50-drivers.md loop #9; S12) for the named loop
+    cells and nothing else: no spawn check, no scored turn. The roster eligibility
+    check an operator runs before committing to a grid; artifacts per cell under
+    ``out/<cell>/loop-probe/``, verdicts cached exactly as a run would cache them."""
+    drivers = drivers or dict(DRIVERS)
+    out = out.resolve()
+    if not cells:
+        raise HarnessError("no loop cells selected; the manifest defines "
+                           f"{[c for c, cell in manifest.cells.items() if cell['driver'] == 'loop']}")
+    unknown = [c for c in cells if c not in manifest.cells]
+    if unknown:
+        raise HarnessError(f"unknown cell(s) {unknown}; the manifest defines {sorted(manifest.cells)}")
+    not_loop = [c for c in cells if manifest.cells[c]["driver"] != "loop"]
+    if not_loop:
+        raise HarnessError(f"cell(s) {not_loop} are not loop cells; the calibration probe applies to "
+                           "loop cells only")
+    driver = drivers["loop"]
+    missing_env = [name for name in driver.required_env if not os.environ.get(name, "").strip()]
+    if missing_env:
+        raise HarnessError(f"driver 'loop' requires env var(s) {missing_env} and none was found. The value "
+                           "reaches the consumer by process env only -- export it in the shell that runs "
+                           "the harness; it appears in no artifact.")
+    out.mkdir(parents=True, exist_ok=True)
+    cache_dir = cache_dir or (out.parent / "loop-probe-cache")
+    log(f"manifest   : {manifest.sha256[:16]}  ({manifest.path})")
+    log(f"probe dir  : {out}")
+    driver.pre_run({c: manifest.cells[c] for c in cells}, dict.fromkeys(cells, 0), None, log)
+    scan = collect_scan_set(manifest.data)
+    for name in driver.required_env:
+        value = os.environ.get(name, "")
+        if len(value) >= 8 and value not in scan:
+            scan.append(value)
+    records: dict[str, dict] = {}
+    for cell_name in cells:
+        cell = manifest.cells[cell_name]
+        gate = driver.cell_gate(cell_name, cell, out / cell_name / "loop-probe", cache_dir, log, timeout_s, scan)
+        record = gate["record"]
+        records[cell_name] = record
+        log(f"probe      : {cell_name}  {cell['model']} @ {record['tuple']['provider']} -> {record['verdict']}"
+            + ("  (cached)" if record.get("cached") else "")
+            + (f"  served={record.get('served_provider')}" if record.get("served_provider") else "")
+            + (f"  -- {record['detail']}" if record.get("detail") else ""))
+    (out / "probe-summary.json").write_text(json.dumps(
+        {"manifest": {"path": str(manifest.path), "sha256": manifest.sha256},
+         "generated_utc": _utcnow(), "cells": records}, indent=2) + "\n")
+    return records
+
+
 def preflight(config: RunConfig) -> None:
     manifest = config.manifest
     transport = manifest.server["transport"]
@@ -1020,6 +1179,9 @@ def run(config: RunConfig) -> RunResult:
     driver_ids = {manifest.cells[c]["driver"] for c in config.cells}
     driver_versions = ({d: None for d in driver_ids} if config.dry_run else
                        {d: config.drivers[d].cli_version() for d in sorted(driver_ids)})
+    invocations_per_cell: dict[str, int] = {}
+    for item in planned:
+        invocations_per_cell[item.cell_name] = invocations_per_cell.get(item.cell_name, 0) + 1
 
     # S9: the run directory is named up front, before anything can go wrong, so an
     # operator who suspects trouble knows where the artifacts are.
@@ -1030,6 +1192,16 @@ def run(config: RunConfig) -> RunResult:
         + ("   [DRY RUN]" if config.dry_run else ""))
     for driver_id in sorted(driver_ids):
         log(f"driver     : {driver_id}  [{driver_versions[driver_id] or 'not recorded: dry run'}]")
+
+    # Family-level pre-run legibility (loop #6, S9 kin): invocation count, the labeled
+    # cost estimate, the data-policy disclosure -- before the first invocation.
+    pre_run_records: dict[str, dict] = {}
+    if not config.dry_run:
+        for driver_id in sorted(driver_ids):
+            record = config.drivers[driver_id].pre_run(
+                {c: manifest.cells[c] for c in config.cells}, invocations_per_cell, config.budget_usd, log)
+            if record is not None:
+                pre_run_records[driver_id] = record
 
     # Q2 gate for drivers WITHOUT API-boundary capture: before any prompt is spent,
     # such a driver hosting a merge-gating cell runs the calibration probe (a
@@ -1066,11 +1238,26 @@ def run(config: RunConfig) -> RunResult:
     results: list[dict] = []
     voided: dict[str, str] = {}
     failures = 0
+    cell_gates: dict[str, dict] = {}
+    budget_stops: list[dict] = []
+    spend_run = 0.0
+    spend_cell: dict[str, float] = {}
+    cache_dir = config.probe_cache_dir or (config.run_dir.parent / "loop-probe-cache")
+    run_stopped = False
+
+    def over_run_cap() -> bool:
+        return config.budget_usd is not None and spend_run >= config.budget_usd
+
     for cell_name in config.cells:
         cell_planned = by_cell.get(cell_name, [])
         if not cell_planned:
             continue
         cell = manifest.cells[cell_name]
+        driver = config.drivers[cell["driver"]]
+        if run_stopped:
+            log(f"cell {cell_name}: not started -- the run-level budget cap stopped the run")
+            continue
+        advertised: list[str] | None = None
         # S8 (from DR-1): fail-fast instrument liveness at spawn. The SUT is spawned
         # once per cell under the invocation's own conditions (neutral cwd, cell env)
         # BEFORE any model turn; a dead or toolless server breaks the cell here,
@@ -1079,6 +1266,7 @@ def run(config: RunConfig) -> RunResult:
             check = spawn_liveness_check(manifest, cell, config.run_dir / cell_name,
                                          scan, config.tmp_base)
             if check["ok"]:
+                advertised = list(check["advertised_tools"])
                 log(f"cell {cell_name}: spawn check live "
                     f"({len(check['advertised_tools'])} tool(s) advertised); "
                     f"{len(cell_planned)} prompt(s)")
@@ -1093,29 +1281,83 @@ def run(config: RunConfig) -> RunResult:
                 log(f"  {len(cell_planned)} prompt(s) skipped without spending model turns; "
                     f"evidence: {config.run_dir / cell_name / 'spawn-check.json'}")
                 continue
+            # The driver family's own cell gate, after the spawn check and before any
+            # model turn: the loop driver's calibration probe (S12; loop #9), cached
+            # per (model, provider, scaffold, driver version). A non-pass BREAKS the
+            # cell with zero prompts spent.
+            gate = driver.cell_gate(cell_name, cell, config.run_dir / cell_name / "loop-probe",
+                                    cache_dir, log, config.timeout_s, scan)
+            if gate is not None:
+                cell_gates[cell_name] = gate["record"]
+                gate_cost = float(gate.get("cost_usd") or 0.0)
+                spend_run += gate_cost
+                spend_cell[cell_name] = spend_cell.get(cell_name, 0.0) + gate_cost
+                record = gate["record"]
+                log(f"cell {cell_name}: calibration probe -> {record.get('verdict')}"
+                    + ("  (cached)" if record.get("cached") else "")
+                    + (f"  served={record.get('served_provider')}" if record.get("served_provider") else "")
+                    + (f"  ${gate_cost:.6f}" if gate_cost else ""))
+                if not gate["ok"]:
+                    reason = f"instrument-broken before any model turn: {gate['reason']}"
+                    write_cell_void(config.run_dir, cell_name, reason)
+                    voided[cell_name] = reason
+                    failures += 1
+                    log(f"cell {cell_name}: BROKEN -- {gate['reason']}")
+                    log(f"  {len(cell_planned)} prompt(s) skipped without spending model turns.")
+                    continue
+        cell_cap = cell.get("budget_usd")
         for index, item in enumerate(cell_planned):
             entry = item.entry
+            remaining = len(cell_planned) - index
+            if over_run_cap():
+                stop = {"scope": "run", "cap_usd": config.budget_usd, "spent_usd": round(spend_run, 8),
+                        "at": f"{cell_name}/{entry['id']}", "skipped_in_cell": remaining}
+                budget_stops.append(stop)
+                run_stopped = True
+                log(f"BUDGET STOP: run spend ${spend_run:.6f} reached the run cap "
+                    f"${config.budget_usd:.2f} before {cell_name}/{entry['id']}; the run stops "
+                    f"cleanly, completed cells stand, {remaining} prompt(s) in this cell not run.")
+                break
+            if cell_cap is not None and spend_cell.get(cell_name, 0.0) >= cell_cap:
+                stop = {"scope": "cell", "cell": cell_name, "cap_usd": cell_cap,
+                        "spent_usd": round(spend_cell[cell_name], 8),
+                        "at": f"{cell_name}/{entry['id']}", "skipped_in_cell": remaining}
+                budget_stops.append(stop)
+                log(f"BUDGET STOP: cell {cell_name} spend ${spend_cell[cell_name]:.6f} reached its "
+                    f"cap ${cell_cap:.2f} before {entry['id']}; {remaining} prompt(s) in this cell "
+                    "not run. Completed invocations stand.")
+                break
             log(f"  -> {cell_name}/{entry['id']}"
                 + ("  [outside cell groups]" if item.outside_cell_groups else ""))
-            meta = run_one(config, item, driver_versions)
+            meta = run_one(config, item, driver_versions, advertised_tools=advertised)
             results.append(meta)
+            if meta.get("spend_usd") is not None:
+                spend_run += float(meta["spend_usd"])
+                spend_cell[cell_name] = spend_cell.get(cell_name, 0.0) + float(meta["spend_usd"])
             flag = ""
             if meta["harness_failure"]:
                 failures += 1
                 flag = f"  HARNESS FAILURE: {meta['harness_failure'][:90]}"
+            family = meta.get(driver.family) if driver.family != "product" else None
+            loop_note = ""
+            if family:
+                served = ",".join(f"{k}x{v}" for k, v in (family.get("served_providers") or {}).items())
+                loop_note = f"  served={served or 'none'} ${float(meta.get('spend_usd') or 0):.6f}"
             log(f"     {entry['id']:6s} {meta['duration_s']:6.1f}s  "
                 f"{meta['trace_records']:>3} trace record(s)  "
-                f"{meta['answer_chars']:>6} chars{flag}")
-            # Attribution breach (a disallowed builtin on the wire, or web-tool
-            # activity in the driver's event streams): the row is not
-            # tool-attributable and the CELL is BROKEN -- refusal is hard, not
-            # best-effort (50-drivers.md #5; the measured failure class includes a
-            # web tool fabricating a fetch result presented as retrieved).
+                f"{meta['answer_chars']:>6} chars{loop_note}{flag}")
+            # Attribution breach (a disallowed builtin on the wire, web-tool
+            # activity in the driver's event streams, a wire surface that differs
+            # from the cell's, a served-provider mismatch, a strict-routing
+            # refusal): the row is not tool-attributable and the CELL is BROKEN --
+            # refusal is hard, not best-effort (50-drivers.md #5; the measured
+            # failure class includes a web tool fabricating a fetch result
+            # presented as retrieved).
             breach = list(meta.get("web_activity_suspected") or [])
-            breach += (meta.get("api_surface") or {}).get("disallowed_builtins_on_wire") or []
+            breach += list(meta.get("breaches") or [])
             if breach:
-                reason = (f"attribution breach in {entry['id']}: {sorted(set(breach))} -- "
-                          "the channel the configuration claims closed is open; no row of "
+                reason = (f"attribution breach in {entry['id']}: {breach[0][:300]} -- "
+                          "the environment the configuration claims does not hold; no row of "
                           "this cell is tool-attributable.")
                 write_cell_void(config.run_dir, cell_name, reason)
                 voided[cell_name] = reason
@@ -1143,6 +1385,27 @@ def run(config: RunConfig) -> RunResult:
         log(f"cell {cell_name}: BROKEN -- zero trace records across every invocation; "
             "an empty run, not a clean one. Do not score it.")
 
+    # S11 marks per cell, for every artifact that names a cell: run-manifest and the
+    # checks report carry the family, scaffold with hash, pin or unpinned, the
+    # reproducibility mark, the served-provider set observed, and the spend.
+    cell_marks: dict[str, dict] = {}
+    for cell_name in config.cells:
+        cell = manifest.cells[cell_name]
+        marks = config.drivers[cell["driver"]].cell_marks(cell)
+        if marks is None:
+            continue
+        served: dict[str, int] = {}
+        family = config.drivers[cell["driver"]].family
+        for meta in results:
+            if meta["cell"] == cell_name:
+                for name, n in ((meta.get(family) or {}).get("served_providers") or {}).items():
+                    served[name] = served.get(name, 0) + n
+        cell_marks[cell_name] = {**marks, "served_providers": served,
+                                 "spend_usd": round(spend_cell.get(cell_name, 0.0), 8),
+                                 "probe": ({k: cell_gates[cell_name].get(k) for k in
+                                            ("verdict", "cached", "probed_at", "served_provider", "cache_path")}
+                                           if cell_name in cell_gates else None)}
+
     checks_report: list[dict] = []
     if manifest.checks and not config.dry_run:
         records_by_invocation = {}
@@ -1152,10 +1415,29 @@ def run(config: RunConfig) -> RunResult:
             records_by_invocation[f"{meta['cell']}/{meta['group']}/{meta['prompt_id']}"] = records
         checks_report = checks_mod.evaluate_checks(manifest.checks, records_by_invocation)
         failures += sum(1 for c in checks_report if c["outcome"] == "error")
-        (config.run_dir / "checks-report.json").write_text(
-            json.dumps(checks_report, indent=2) + "\n")
+        # Every row a loop cell emits carries its reproducibility mark (loop #4):
+        # failure references name an invocation, so the mark rides on each one.
+        for check in checks_report:
+            for failure in check.get("failures") or []:
+                cell_of_row = str(failure.get("invocation", "")).split("/")[0]
+                if cell_of_row in cell_marks:
+                    failure["driver_family"] = cell_marks[cell_of_row]["driver_family"]
+                    failure["reproducibility"] = cell_marks[cell_of_row]["reproducibility"]
+        (config.run_dir / "checks-report.json").write_text(json.dumps({
+            "cells": {c: {"driver": manifest.cells[c]["driver"], **cell_marks.get(c, {})}
+                      for c in config.cells},
+            "checks": checks_report,
+        }, indent=2) + "\n")
         for check in checks_report:
             log(f"check      : {check['id']}: {check['outcome']}  (matched {check['matched']})")
+
+    if budget_stops:
+        for stop in budget_stops:
+            log(f"budget stop: {stop['scope']} cap ${stop['cap_usd']:.2f} reached "
+                f"(spent ${stop['spent_usd']:.6f}) at {stop['at']}")
+    if spend_run or config.budget_usd is not None:
+        log(f"spend      : ${spend_run:.6f} actual (summed usage.cost)"
+            + (f"  of run cap ${config.budget_usd:.2f}" if config.budget_usd is not None else ""))
 
     log(f"harness failures: {failures}  (these are NOT consumer results)")
     log("This harness does not score. Pass/fail against the pinned criteria in each "
@@ -1179,6 +1461,18 @@ def run(config: RunConfig) -> RunResult:
         "voided_cells": voided,
         "zero_trace_cell_failures": dead,
         "checks": {c["id"]: c["outcome"] for c in checks_report},
+        # Family-level records: the pre-run legibility output (estimate, disclosure),
+        # per-cell gates (the loop calibration probe), and the S11 marks per cell with
+        # the served-provider set and spend actually observed.
+        "pre_run": pre_run_records,
+        "cell_gates": cell_gates,
+        "loop_cells": {c: m for c, m in cell_marks.items() if m.get("driver_family") == "loop"},
+        # Spend and caps: the run-level outcome the budget stop is (loop #6).
+        "budget": {"run_cap_usd": config.budget_usd,
+                   "spent_usd": round(spend_run, 8),
+                   "per_cell_spent_usd": {c: round(v, 8) for c, v in spend_cell.items()},
+                   "stops": budget_stops,
+                   "run_stopped_by_budget": run_stopped},
         "failures": failures,
         "results": results,
     }
@@ -1186,4 +1480,5 @@ def run(config: RunConfig) -> RunResult:
                    json.dumps(run_manifest, indent=2) + "\n", scan)
     return RunResult(run_dir=config.run_dir, results=results, failures=failures,
                      zero_trace_cells=dead, checks_report=checks_report,
-                     driver_probes=driver_probes, voided_cells=voided)
+                     driver_probes=driver_probes, voided_cells=voided,
+                     budget_stops=budget_stops, spend_usd=round(spend_run, 8))

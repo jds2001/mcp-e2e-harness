@@ -48,6 +48,11 @@ def _tool_schemas(procedure: CrowdingProcedure) -> list[dict]:
     ]
 
 
+def tool_names(procedure: CrowdingProcedure) -> list[str]:
+    """The distractor's tool names, for stating a crowded cell's expected wire surface."""
+    return [t["name"] for t in _tool_schemas(procedure)]
+
+
 class _Store:
     def __init__(self, state_file: Path | None):
         self.state_file = state_file

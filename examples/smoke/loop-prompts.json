@@ -1,0 +1,140 @@
+{
+  "_about": "Loop-driver smoke suite: drives the harness's own loop consumer (50-drivers.md -> loop) against the harness's distractor MCP server as the system under test, through the recorder, on OpenRouter. Proves the instrument (calibration probe, strict routing, served-provider recording, exact S7 surface check, sessions/crowding, cost recording), never a server -- nothing here is a measurement worth scoring. Needs OPENROUTER_API_KEY in the environment. Run: `uv run mcp-e2e run --manifest examples/smoke/loop-prompts.json --budget-usd 0.05`. Spend is on the order of a tenth of a cent (measured 2026-09-18: $0.0008 for the three cells).",
+  "_portability": "transport.command is plain `python3`, as in prompts.json: resolves to the project venv's interpreter under `uv run`.",
+  "suite": {
+    "name": "harness-smoke-loop",
+    "spec": "documentation/50-drivers.md",
+    "manifest_version": "1"
+  },
+  "server": {
+    "name": "notes_sut",
+    "transport": {
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "-m",
+        "mcp_e2e_harness.distractor",
+        "--procedure",
+        "neutral-file-triage@2"
+      ]
+    }
+  },
+  "cells": {
+    "loop-smoke-pinned": {
+      "_": "pinned open-weight floor model, fresh, full surface: proves the probe gate, the pin's strict routing, per-request served-provider recording, and the exact wire-surface check",
+      "driver": "loop",
+      "endpoint": "openrouter",
+      "scaffold": "loop-scaffold@1",
+      "model": "openai/gpt-oss-120b",
+      "provider": "deepinfra/bf16",
+      "knobs": {
+        "reasoning": {
+          "effort": "low"
+        },
+        "max_tokens": 2048
+      },
+      "role": "floor",
+      "context": "fresh",
+      "tool_surface": "full",
+      "merge_gating": false,
+      "groups": [
+        "S"
+      ],
+      "budget_usd": 0.02
+    },
+    "loop-smoke-isolation-unpinned": {
+      "_": "unpinned, list-valued surface: proves the unpinned reproducibility mark on every artifact and the proxy-enforced surface on the wire",
+      "driver": "loop",
+      "endpoint": "openrouter",
+      "scaffold": "loop-scaffold@1",
+      "model": "openai/gpt-oss-120b",
+      "knobs": {
+        "reasoning": {
+          "effort": "low"
+        },
+        "max_tokens": 2048
+      },
+      "role": "isolation",
+      "context": "fresh",
+      "tool_surface": [
+        "read_note"
+      ],
+      "merge_gating": false,
+      "groups": [
+        "S"
+      ],
+      "prompts": [
+        "S2"
+      ],
+      "budget_usd": 0.02
+    },
+    "loop-smoke-crowded": {
+      "_": "crowded context: proves the session mechanics (pre-turn then scored turn in one conversation), the distractor beside the SUT on the wire, and the separate pre-turn trace",
+      "driver": "loop",
+      "endpoint": "openrouter",
+      "scaffold": "loop-scaffold@1",
+      "model": "openai/gpt-oss-120b",
+      "provider": "deepinfra/bf16",
+      "knobs": {
+        "reasoning": {
+          "effort": "low"
+        },
+        "max_tokens": 2048
+      },
+      "role": "floor",
+      "context": "crowded",
+      "crowding": {
+        "procedure": "neutral-file-triage@2",
+        "collision_review": "2026-09-18 (smoke only): NOT a disjointness attestation -- this suite's SUT deliberately IS the distractor content. Acceptable only because this suite smoke-tests the instrument and its results are never scored."
+      },
+      "tool_surface": "full",
+      "merge_gating": false,
+      "groups": [
+        "S"
+      ],
+      "prompts": [
+        "S1"
+      ],
+      "budget_usd": 0.05
+    }
+  },
+  "checks": [
+    {
+      "id": "content-is-typed",
+      "description": "every tool response carries typed content",
+      "applies_to": {
+        "tool": "*"
+      },
+      "assert": {
+        "present": [
+          "/response/content/0/type"
+        ]
+      }
+    }
+  ],
+  "prompts": [
+    {
+      "id": "S1",
+      "group": "S",
+      "title": "list the inbox",
+      "prompt": "Using the notes_sut server, tell me which notes are still unfiled: list their ids and titles.",
+      "sourcing": "measured",
+      "grounding": "the distractor procedure defines 12 notes (crowding.py); the crowded cell files four first",
+      "pass": "lists the unfiled notes from a tool result",
+      "fail": "invents notes or answers without calling a tool",
+      "watch": null,
+      "_why_named": "Smoke only: the crowded cell registers the distractor beside a SUT that serves the same tools, so the prompt names the SUT to keep the scored turn's trace on the instrument under test. A real suite never needs this: its server's domain is disjoint from the crowding procedure by attestation."
+    },
+    {
+      "id": "S2",
+      "group": "S",
+      "title": "read one note",
+      "prompt": "Read note n03 and tell me what it says.",
+      "sourcing": "measured",
+      "grounding": "note n03 is the fire drill note (crowding.py)",
+      "pass": "quotes the fire drill note from the read_note result",
+      "fail": "answers without the tool or invents content",
+      "watch": null
+    }
+  ]
+}

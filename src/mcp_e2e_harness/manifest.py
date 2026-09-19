@@ -22,10 +22,14 @@ from pathlib import Path
 from typing import Any
 
 from . import crowding
+from .loop_scaffold import SCAFFOLDS
+from .openrouter import DATA_POLICIES, DEPLOYMENTS, RESERVED_REQUEST_KEYS, parse_pin
 from .secrets import is_secret_ref
 
 SOURCING_VALUES = ("measured", "derived", "verbatim-original")
 CONTEXT_VALUES = ("fresh", "crowded")
+LOOP_DRIVER_ID = "loop"
+LOOP_CELL_KEYS = ("endpoint", "provider", "scaffold", "data_policy", "budget_usd")
 
 
 class ManifestError(ValueError):
@@ -130,15 +134,65 @@ def _validate_setup(setup: Any, path: str) -> None:
         _obj(action["args"], f"{path}[{i}].args")
 
 
+def _validate_loop_cell(cell: dict, path: str) -> None:
+    """Loop-driver cells (20-manifest.md, "Loop-driver cells", frozen 2026-09-18).
+
+    ``endpoint`` names a deployment (harness configuration: hosts and credentials
+    never appear in a manifest); ``model`` carries no routing-shortcut suffix
+    (``:free`` and kin are routing preferences, not identities -- routing is
+    ``provider``); ``scaffold`` names a registered harness scaffold; ``provider`` is an
+    endpoint tag verbatim; ``data_policy`` is deny (default) or allow; ``budget_usd``
+    a positive number; and no knob may name a request key the harness constructs.
+    """
+    if not _given(cell, "endpoint"):
+        _fail(path, "loop cells require 'endpoint' naming a deployment "
+                    f"(available: {sorted(DEPLOYMENTS)})")
+    endpoint = cell["endpoint"]
+    if endpoint not in DEPLOYMENTS:
+        _fail(f"{path}.endpoint", f"{endpoint!r} is not a named deployment (available: "
+                                  f"{sorted(DEPLOYMENTS)}); base URL and credential are harness "
+                                  "configuration, never manifest content")
+    if ":" in cell["model"]:
+        _fail(f"{path}.model", f"{cell['model']!r} carries a routing suffix; a suffix such as ':free' "
+                               "is a routing preference, not an identity -- express routing in "
+                               "'provider' and pin an endpoint tag")
+    if not _given(cell, "scaffold"):
+        _fail(path, f"loop cells require 'scaffold' (available: {sorted(SCAFFOLDS)})")
+    scaffold = cell["scaffold"]
+    if scaffold not in SCAFFOLDS:
+        _fail(f"{path}.scaffold", f"{scaffold!r} is not a harness scaffold (available: "
+                                  f"{sorted(SCAFFOLDS)}); the scaffold is instrument content, "
+                                  "pinned by content hash, and joins cell identity")
+    if _given(cell, "provider"):
+        try:
+            parse_pin(cell["provider"])
+        except ValueError as exc:
+            _fail(f"{path}.provider", str(exc))
+    if _given(cell, "data_policy") and cell["data_policy"] not in DATA_POLICIES:
+        _fail(f"{path}.data_policy", f"must be one of {DATA_POLICIES}, got {cell['data_policy']!r}")
+    if _given(cell, "budget_usd"):
+        budget = cell["budget_usd"]
+        if isinstance(budget, bool) or not isinstance(budget, (int, float)) or budget <= 0:
+            _fail(f"{path}.budget_usd", "must be a positive number (USD)")
+    reserved = sorted(k for k in cell["knobs"] if k in RESERVED_REQUEST_KEYS)
+    if reserved:
+        _fail(f"{path}.knobs", f"knob(s) {reserved} name request fields the harness constructs "
+                               f"({list(RESERVED_REQUEST_KEYS)}); they cannot be knobs")
+
+
 def _validate_cell(name: str, cell: Any, secret_keys: set[str], server_name: str) -> None:
     path = f"cells.{name}"
     cell = _obj(cell, path)
+    _string(cell, "driver", path) if "driver" in cell else _fail(path, "missing required key 'driver'")
+    is_loop = cell["driver"] == LOOP_DRIVER_ID
     _check_keys(cell, path,
                 ("driver", "model", "knobs", "role", "context", "tool_surface", "merge_gating", "groups"),
-                ("crowding", "prompts", "variant", "setup", "env", "notes"))
-    _string(cell, "driver", path)
+                ("crowding", "prompts", "variant", "setup", "env", "notes")
+                + (LOOP_CELL_KEYS if is_loop else ()))
     _string(cell, "model", path)
     _obj(cell["knobs"], f"{path}.knobs")
+    if is_loop:
+        _validate_loop_cell(cell, path)
     _string(cell, "role", path)
     context = cell["context"]
     if context not in CONTEXT_VALUES:

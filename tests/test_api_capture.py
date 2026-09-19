@@ -200,12 +200,25 @@ def test_gzip_request_body_is_measured_decompressed(tmp_path, fake_api_upstream)
     assert recorder.unrecorded_requests == 0
 
 
-def test_the_allowlist_has_exactly_one_entry():
-    # Growing it is a spec commit in 10-harness.md, never an implementation convenience.
-    assert list(RESPONSE_SCALAR_ALLOWLIST) == ["count_tokens"]
-    paths, key = RESPONSE_SCALAR_ALLOWLIST["count_tokens"]
-    assert key == "input_tokens"
-    assert set(paths) == {"/v1/messages/count_tokens", "/v1/responses/input_tokens"}
+def test_the_allowlist_is_confined_to_the_contract():
+    # Growing it is a spec commit in 10-harness.md, never an implementation convenience:
+    # the count-tokens entry (Q7) plus the five loop scalars added 2026-09-18, nothing else.
+    assert list(RESPONSE_SCALAR_ALLOWLIST) == ["count_tokens", "chat_completions"]
+    count = RESPONSE_SCALAR_ALLOWLIST["count_tokens"]
+    assert set(count.suffixes) == {"/v1/messages/count_tokens", "/v1/responses/input_tokens"}
+    assert [(s.key, s.pointer, s.kind) for s in count.scalars] == [("count_tokens", ("input_tokens",), "number")]
+    chat = RESPONSE_SCALAR_ALLOWLIST["chat_completions"]
+    assert chat.suffixes == ("/chat/completions",)
+    assert [(s.key, s.path, s.kind) for s in chat.scalars] == [
+        ("provider", "provider", "string"),
+        ("usage_prompt_tokens", "usage.prompt_tokens", "number"),
+        ("usage_completion_tokens", "usage.completion_tokens", "number"),
+        ("usage_reasoning_tokens", "usage.completion_tokens_details.reasoning_tokens", "number"),
+        ("usage_cost", "usage.cost", "number"),
+    ]
+    every_key = {s.key for e in RESPONSE_SCALAR_ALLOWLIST.values() for s in e.scalars}
+    assert every_key == {"count_tokens", "provider", "usage_prompt_tokens", "usage_completion_tokens",
+                         "usage_reasoning_tokens", "usage_cost"}
 
 
 @pytest.mark.parametrize("path", ["/v1/messages/count_tokens", "/v1/responses/input_tokens"])

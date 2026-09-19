@@ -3,6 +3,7 @@
     mcp-e2e validate --manifest suite/manifest.json
     mcp-e2e run --manifest suite/manifest.json [--run-dir runs/X] [--cells a,b]
                 [--groups A,B] [--prompts A1,B2] [--dry-run] [--timeout 900]
+                [--budget-usd 2.00] [--loop-probe-cache DIR]
 
 The harness executes and records; it never scores. Pass/fail against the pinned
 criteria in each meta.json is a human/spec-session judgment, recorded beside -- never
@@ -27,6 +28,7 @@ from .runner import (
     RunConfig,
     probe_builtin_surface,
     probe_egress,
+    probe_loop_cells,
     run,
 )
 from .secrets import MissingSecretError, SecretLeakError
@@ -74,6 +76,8 @@ def cmd_run(args: argparse.Namespace) -> int:
         prompts={p.strip() for p in args.prompts.split(",")} if args.prompts else None,
         dry_run=args.dry_run,
         timeout_s=args.timeout,
+        budget_usd=args.budget_usd,
+        probe_cache_dir=Path(args.loop_probe_cache) if args.loop_probe_cache else None,
     )
     # The runner itself reports live (ruling S9: never silent -- run dir up front,
     # cell/prompt starts, turn transitions, completions); nothing to repeat here.
@@ -136,6 +140,22 @@ def cmd_probe_egress(args: argparse.Namespace) -> int:
     return 0 if record["verdict"] == EGRESS_PASS else 1
 
 
+def cmd_probe_loop(args: argparse.Namespace) -> int:
+    manifest = _load(args.manifest)
+    cells = ([c.strip() for c in args.cells.split(",") if c.strip()]
+             if args.cells else [c for c, cell in manifest.cells.items() if cell["driver"] == "loop"])
+    out = Path(args.out) if args.out else (
+        Path.cwd() / "runs" / f"loop-probe-{datetime.now(timezone.utc).strftime('%Y-%m-%dT%H%M%SZ')}")
+    try:
+        records = probe_loop_cells(manifest, cells, out, timeout_s=args.timeout,
+                                   cache_dir=Path(args.loop_probe_cache) if args.loop_probe_cache else None)
+    except (HarnessError, MissingSecretError) as exc:
+        print(f"FATAL: {exc}")
+        return 2
+    print(f"evidence   : {out}  (per cell: loop-probe/probe.json and its recorder line, marked probe)")
+    return 0 if all(r["verdict"] == "pass" for r in records.values()) else 1
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mcp-e2e", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -157,6 +177,13 @@ def main(argv: list[str] | None = None) -> int:
                        help="validate manifest, cells, and argv without calling any model or server")
     p_run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S,
                        help=f"per-invocation timeout in seconds (default {DEFAULT_TIMEOUT_S})")
+    p_run.add_argument("--budget-usd", type=float, default=None,
+                       help="run-level spend cap in USD for loop cells (summed actual usage.cost); "
+                            "reaching it stops the run cleanly -- completed cells stand and the stop "
+                            "is recorded in run-manifest.json. Per-cell caps are the cells' budget_usd.")
+    p_run.add_argument("--loop-probe-cache", default=None,
+                       help="directory caching loop calibration-probe verdicts per (model, provider, "
+                            "scaffold, driver version) (default: loop-probe-cache beside the run dir)")
     p_run.set_defaults(func=cmd_run)
 
     p_probe = sub.add_parser(
@@ -188,6 +215,19 @@ def main(argv: list[str] | None = None) -> int:
                           help="artifact directory (default runs/egress-probe-<driver>-<utc>)")
     p_egress.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
     p_egress.set_defaults(func=cmd_probe_egress)
+
+    p_loop = sub.add_parser(
+        "probe-loop",
+        help="run only the loop driver's calibration probe for the manifest's loop cells "
+             "(one discarded request per (model, provider, scaffold, driver version), cached; "
+             "no scored turn is spent) -- the S12 eligibility check for a roster")
+    p_loop.add_argument("--manifest", required=True)
+    p_loop.add_argument("--cells", default=None, help="comma-separated loop cell names (default: all loop cells)")
+    p_loop.add_argument("--out", default=None, help="artifact directory (default runs/loop-probe-<utc>)")
+    p_loop.add_argument("--loop-probe-cache", default=None,
+                        help="probe verdict cache directory (default: loop-probe-cache beside --out)")
+    p_loop.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S)
+    p_loop.set_defaults(func=cmd_probe_loop)
 
     args = parser.parse_args(argv)
     return args.func(args)

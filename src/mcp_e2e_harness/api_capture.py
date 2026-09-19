@@ -20,15 +20,22 @@ other header (credentials ride there), never message content, never tool schemas
 Body-less requests (GETs) are forwarded and not recorded.
 
 Response bodies are read only through ``RESPONSE_SCALAR_ALLOWLIST``: named scalar
-extractions, one per allowlisted endpoint, recorded on that request's own line. The
-allowlist has exactly one entry -- ``count_tokens``, the numeric token count a
-count-tokens endpoint returns, present only when the driver itself made that call.
-Extraction decodes whatever response encoding the driver negotiated; an encoding
-the recorder cannot decode leaves the scalar null with the encoding named in
-``count_tokens_note`` and is counted in the digest as ``count_tokens_unread`` --
-a failed read is never recorded as an absent call (DR-3). Growing the allowlist is
-a spec commit (10-harness.md), never an implementation convenience. Every other
-response is forwarded without being looked at.
+extractions per allowlisted endpoint, recorded on that request's own line. Two
+endpoints are allowlisted: the count-tokens endpoint (one scalar, ``count_tokens``,
+the numeric count, present only when the driver itself made that call) and -- added
+2026-09-18 for the loop driver (10-harness.md, recording contract; 50-drivers.md loop
+requirements 4 and 6) -- the OpenAI-compatible chat-completions endpoint, with five
+scalars: the served ``provider`` string and four usage numbers (``usage.prompt_tokens``,
+``usage.completion_tokens``, ``usage.completion_tokens_details.reasoning_tokens``,
+``usage.cost``), recorded under ``provider`` and ``usage_prompt_tokens`` /
+``usage_completion_tokens`` / ``usage_reasoning_tokens`` / ``usage_cost``. Each is
+null with a ``<key>_note`` when absent or unreadable. Extraction decodes whatever
+response encoding the driver negotiated; an encoding the recorder cannot decode
+leaves the scalar null with the encoding named and is counted in the digest as an
+unread call -- a failed read is never recorded as an absent call (DR-3). Nothing
+else from any response body, ever. Growing the allowlist is a spec commit
+(10-harness.md), never an implementation convenience. Every other response is
+forwarded without being looked at.
 
 Forwarding is streaming (chunked pass-through), so SSE responses reach the driver as
 they arrive; the proxy must never change the timing shape enough to alter driver
@@ -41,6 +48,7 @@ import gzip
 import json
 import threading
 import zlib
+from dataclasses import dataclass
 
 import brotli
 
@@ -65,11 +73,14 @@ from urllib.parse import urlsplit
 def _extract_tool_names(payload: dict) -> tuple[list[str] | None, str | None]:
     """The tool surface a request declares, wherever this API dialect carries it.
 
-    Two measured channels (2026-09-01):
+    Three measured channels (2026-09-01; chat-completions shape 2026-09-18):
 
     * ``tools`` array (standard Responses/Messages shape). name-or-type: hosted tools
       (web_search and kin) carry a ``type`` and no ``name``; recording only names
-      would blind the disallowed check to exactly the tools it exists to catch.
+      would blind the disallowed check to exactly the tools it exists to catch. The
+      OpenAI-compatible chat-completions shape the loop driver speaks nests the name:
+      ``{"type": "function", "function": {"name": ...}}`` -- that name is taken, and
+      only the name (the schema under ``parameters`` is never read).
     * ``client_metadata["x-codex-turn-metadata"].code_mode_tool_names`` -- codex-family
       models ("code mode") send NO tools array even in a working tool-calling turn;
       the roster the backend-injected harness serves travels here as a name->
@@ -81,7 +92,15 @@ def _extract_tool_names(payload: dict) -> tuple[list[str] | None, str | None]:
     """
     tools = payload.get("tools")
     if isinstance(tools, list):
-        names = [t.get("name") or t.get("type") for t in tools if isinstance(t, dict)]
+        names = []
+        for t in tools:
+            if not isinstance(t, dict):
+                continue
+            function = t.get("function")
+            if t.get("type") == "function" and isinstance(function, dict) and function.get("name"):
+                names.append(function["name"])
+            else:
+                names.append(t.get("name") or t.get("type"))
         return [n for n in names if n], "tools"
     meta = payload.get("client_metadata")
     if isinstance(meta, dict):
@@ -98,27 +117,68 @@ def _extract_tool_names(payload: dict) -> tuple[list[str] | None, str | None]:
     return None, None
 
 
+@dataclass(frozen=True)
+class ScalarExtraction:
+    """One allowlisted response scalar: the record key it lands under, the path into
+    the response JSON object, and whether it is a number or a string."""
+    key: str
+    pointer: tuple[str, ...]
+    kind: str  # "number" | "string"
+
+    @property
+    def path(self) -> str:
+        return ".".join(self.pointer)
+
+
+@dataclass(frozen=True)
+class AllowlistedEndpoint:
+    suffixes: tuple[str, ...]
+    scalars: tuple[ScalarExtraction, ...]
+
+
 # The response-side allowlist (10-harness.md, recording contract). Entry name ->
-# (endpoint path suffixes, response JSON key holding the numeric scalar). The single
-# entry covers the count-tokens endpoint in both dialects the drivers speak: Anthropic
-# Messages (``/v1/messages/count_tokens``) and OpenAI Responses
-# (``/v1/responses/input_tokens``); both return the count under ``input_tokens``.
+# (endpoint path suffixes, the named scalars read from that endpoint's responses).
+#
+# ``count_tokens`` covers the count-tokens endpoint in both dialects the product
+# drivers speak: Anthropic Messages (``/v1/messages/count_tokens``) and OpenAI
+# Responses (``/v1/responses/input_tokens``); both return the count under
+# ``input_tokens``. ``chat_completions`` (2026-09-18) covers the OpenAI-compatible
+# chat-completions endpoint the loop driver speaks: the served provider and four usage
+# scalars, needed for served-provider identity per request and per-request cost
+# (50-drivers.md loop #4/#6; measurement: openrouter-probe-2026-09-18.md).
+#
 # Adding an entry here without the spec commit that names the endpoint, the scalar,
 # and the measurement that needed it is a contract breach.
-RESPONSE_SCALAR_ALLOWLIST: dict[str, tuple[tuple[str, ...], str]] = {
-    "count_tokens": (("/v1/messages/count_tokens", "/v1/responses/input_tokens"), "input_tokens"),
+RESPONSE_SCALAR_ALLOWLIST: dict[str, AllowlistedEndpoint] = {
+    "count_tokens": AllowlistedEndpoint(
+        suffixes=("/v1/messages/count_tokens", "/v1/responses/input_tokens"),
+        scalars=(ScalarExtraction("count_tokens", ("input_tokens",), "number"),),
+    ),
+    "chat_completions": AllowlistedEndpoint(
+        suffixes=("/chat/completions",),
+        scalars=(
+            ScalarExtraction("provider", ("provider",), "string"),
+            ScalarExtraction("usage_prompt_tokens", ("usage", "prompt_tokens"), "number"),
+            ScalarExtraction("usage_completion_tokens", ("usage", "completion_tokens"), "number"),
+            ScalarExtraction("usage_reasoning_tokens",
+                             ("usage", "completion_tokens_details", "reasoning_tokens"), "number"),
+            ScalarExtraction("usage_cost", ("usage", "cost"), "number"),
+        ),
+    ),
 }
 
-# Buffering cap for an allowlisted response: the scalar responses are a few dozen
-# bytes; anything past this is not the endpoint we think it is.
-_ALLOWLISTED_RESPONSE_CAP = 1 << 20
+# Buffering cap for an allowlisted response: count-tokens responses are a few dozen
+# bytes and a non-streamed chat completion is the assistant's output (answer text,
+# tool-call arguments, reasoning carrier) -- kilobytes; anything past this is not the
+# endpoint we think it is and the scalars go unread with the cap named.
+_ALLOWLISTED_RESPONSE_CAP = 8 << 20
 
 
 def _allowlist_entry(path: str) -> str | None:
     """The allowlist entry an endpoint path falls under, or None (the common case)."""
     bare = path.split("?")[0].rstrip("/")
-    for name, (suffixes, _key) in RESPONSE_SCALAR_ALLOWLIST.items():
-        if any(bare.endswith(suffix) for suffix in suffixes):
+    for name, endpoint in RESPONSE_SCALAR_ALLOWLIST.items():
+        if any(bare.endswith(suffix) for suffix in endpoint.suffixes):
             return name
     return None
 
@@ -171,17 +231,20 @@ def _parse_json_object(body: bytes, content_encoding: str | None) -> tuple[dict 
     return None, None
 
 
-def _extract_scalar(response_body: bytes, content_encoding: str | None,
-                    key: str) -> tuple[int | float | None, str | None]:
-    """The allowlisted numeric scalar from a response body; (None, why) when absent."""
-    payload, _decoded = _parse_json_object(response_body, content_encoding)
-    if payload is None:
-        return None, ("response body not parseable as a JSON object "
-                      f"(encoding: {content_encoding or 'identity'})")
-    value = payload.get(key)
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return None, f"response carries no numeric {key!r}"
-    return value, None
+def _extract_scalar(payload: dict, scalar: ScalarExtraction) -> tuple[int | float | str | None, str | None]:
+    """One allowlisted scalar from a parsed response object; (None, why) when absent."""
+    node: object = payload
+    for token in scalar.pointer:
+        if not isinstance(node, dict) or token not in node:
+            return None, f"response carries no {scalar.path!r}"
+        node = node[token]
+    if scalar.kind == "number":
+        if isinstance(node, bool) or not isinstance(node, (int, float)):
+            return None, f"response carries no numeric {scalar.path!r}"
+        return node, None
+    if not isinstance(node, str) or not node:
+        return None, f"response carries no string {scalar.path!r}"
+    return node, None
 
 
 # Hop-by-hop headers; everything else is forwarded verbatim in both directions.
@@ -192,9 +255,14 @@ _HOP_BY_HOP = {"connection", "keep-alive", "proxy-authenticate", "proxy-authoriz
 class ApiSurfaceRecorder:
     """A localhost HTTP server that records tool surfaces and forwards to ``upstream``."""
 
-    def __init__(self, record_file: Path, upstream: str):
+    def __init__(self, record_file: Path, upstream: str, mark: dict | None = None):
         self.record_file = record_file
         self.upstream = urlsplit(upstream)
+        # Harness-configured stamps on every line this recorder writes -- e.g.
+        # ``{"probe": true}`` for the loop driver's calibration probe, whose request
+        # goes through this same recorder but is never a scored request. The stamp
+        # is configuration, not something read off the bytes.
+        self.mark = dict(mark or {})
         if self.upstream.scheme not in ("http", "https") or not self.upstream.netloc:
             raise ValueError(f"upstream must be an http(s) URL, got {upstream!r}")
         self._lock = threading.Lock()
@@ -293,6 +361,7 @@ class ApiSurfaceRecorder:
         }
         if payload is not None:
             record["tool_names"], record["tool_source"] = _extract_tool_names(payload)
+        record.update(self.mark)
         if _allowlist_entry(path) is not None:
             return record
         self._write(record)
@@ -386,21 +455,27 @@ class ApiSurfaceRecorder:
     def _finish_allowlisted(self, record: dict, entry: str, status: int | None,
                             response_body: bytes | None, content_encoding: str | None,
                             note: str | None) -> None:
-        """Attach the allowlisted scalar (or why it is absent) and write the held line.
+        """Attach the endpoint's allowlisted scalars (or why each is absent) and write
+        the held line.
 
-        The scalar lands under the entry's name (``count_tokens``), with
-        ``<entry>_note`` null on success and naming the reason otherwise -- a call the
-        driver made is always visible as such, even when the count could not be read.
+        Each scalar lands under its record key (``count_tokens``; ``provider``,
+        ``usage_prompt_tokens``, ...), with ``<key>_note`` null on success and naming
+        the reason otherwise -- a call the driver made is always visible as such,
+        even when the value could not be read.
         """
-        key = RESPONSE_SCALAR_ALLOWLIST[entry][1]
-        value = None
+        payload: dict | None = None
         if note is None:
             if status is not None and status >= 400:
                 note = f"upstream answered HTTP {status}"
             else:
-                value, note = _extract_scalar(response_body or b"", content_encoding, key)
-        record[entry] = value
-        record[f"{entry}_note"] = note
+                payload, _decoded = _parse_json_object(response_body or b"", content_encoding)
+                if payload is None:
+                    note = ("response body not parseable as a JSON object "
+                            f"(encoding: {content_encoding or 'identity'})")
+        for scalar in RESPONSE_SCALAR_ALLOWLIST[entry].scalars:
+            value, why = (None, note) if payload is None else _extract_scalar(payload, scalar)
+            record[scalar.key] = value
+            record[f"{scalar.key}_note"] = why
         self._write(record)
 
 
@@ -413,13 +488,7 @@ def summarize(record_file: Path, disallowed: tuple[str, ...]) -> dict | None:
     """
     if not record_file.exists():
         return None
-    records = []
-    for line in record_file.read_text(errors="replace").splitlines():
-        if line.strip():
-            try:
-                records.append(json.loads(line))
-            except json.JSONDecodeError:
-                continue
+    records = read_records(record_file)
     # Pre-2026-09 capture files carry no basis field; every line in them parsed.
     readable = [r for r in records if r.get("body_bytes_basis", "decompressed") != "wire"]
     with_tools = [r for r in records if r.get("tool_names") is not None]
@@ -442,3 +511,70 @@ def summarize(record_file: Path, disallowed: tuple[str, ...]) -> dict | None:
         # read is a call that happened, never an absent call (DR-3).
         "count_tokens_unread": sum(1 for r in records if "count_tokens" in r and r["count_tokens"] is None),
     }
+
+
+def read_records(record_file: Path, *, include_probe: bool = False) -> list[dict]:
+    """The parsed lines of a capture file. Lines stamped ``probe`` (the loop driver's
+    calibration probe) are never scored requests and are left out unless asked for."""
+    records: list[dict] = []
+    if not record_file.exists():
+        return records
+    for line in record_file.read_text(errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if record.get("probe") and not include_probe:
+            continue
+        records.append(record)
+    return records
+
+
+def surface_mismatches(records: list[dict], expected: list[str]) -> list[dict]:
+    """S7 in its exact form (50-drivers.md loop #3): every recorded tools array must
+    EQUAL the expected wire surface. One entry per request that differs, naming the
+    extra and missing names; a request with no tools array is missing all of them."""
+    want = set(expected)
+    out: list[dict] = []
+    for record in records:
+        names = record.get("tool_names")
+        got = set(names) if isinstance(names, list) else set()
+        if got != want:
+            out.append({"seq": record.get("seq"),
+                        "extra": sorted(got - want),
+                        "missing": sorted(want - got)})
+    return out
+
+
+def loop_digest(record_file: Path) -> dict:
+    """Per-invocation sums of the chat-completions scalars off the recorder's lines:
+    served providers with counts (``(absent)`` when a line carries none), the usage
+    sums, cost, and how many lines had an unreadable provider or cost (a failed read
+    is counted, never folded into zero). Probe-stamped lines are included only when
+    the file is a probe's own capture."""
+    records = read_records(record_file, include_probe=True)
+    lines = [r for r in records if "provider" in r or "usage_cost" in r]
+    providers: dict[str, int] = {}
+    usage = {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0, "cost_usd": 0.0}
+    unread = {"provider": 0, "cost": 0}
+    for r in lines:
+        served = r.get("provider") or "(absent)"
+        providers[served] = providers.get(served, 0) + 1
+        if r.get("provider") is None:
+            unread["provider"] += 1
+        for key, field_name in (("usage_prompt_tokens", "prompt_tokens"),
+                                ("usage_completion_tokens", "completion_tokens"),
+                                ("usage_reasoning_tokens", "reasoning_tokens")):
+            value = r.get(key)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                usage[field_name] += value
+        cost = r.get("usage_cost")
+        if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+            usage["cost_usd"] += cost
+        else:
+            unread["cost"] += 1
+    usage["cost_usd"] = round(usage["cost_usd"], 8)
+    return {"requests": len(lines), "served_providers": providers, "usage": usage,
+            "provider_unread": unread["provider"], "cost_unread": unread["cost"], "lines": lines}
