@@ -8,6 +8,10 @@
 2. **Distinct-answer count per cell** in `run-manifest.json` (`loop_cells.<cell>.answers: {"invocations": N, "distinct": M, "digests": {...}}` or equivalent), computed from a digest of `answer.txt` across the cell's invocations in the run. Product cells may carry the same field; it is cheap and the determinism question is not loop-specific.
 3. **Tests** for both, fake upstream; `ruff` clean; nothing under `documentation/`. Live spend: $0 expected.
 
+## Sequencing
+
+The uscde-mcp spec session's E17 waits on deliverable 1: it separates cap-cut rows from self-cut rows by the recorded finish reason rather than by token-count inference. Land this before the next scored C1 run under the loop driver. The derived loop manifest under `runs/2026-09-18-q8-manifest/` is retired (`10-harness.md`, division of labor); scored loop runs use the suite's own manifest once it carries loop cells.
+
 ## Acceptance
 
 One example line for `finish_reason` (a `length` case and a `stop` case from the fake), one run-manifest excerpt showing invocations versus distinct with at least one duplicate, and the test names.
