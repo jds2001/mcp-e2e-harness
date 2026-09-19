@@ -194,6 +194,15 @@ class ChatClient:
             error = payload.get("error")
             if isinstance(error, dict):
                 message = str(error.get("message") or "")
+                # OpenRouter puts the upstream's own words under metadata.raw
+                # ("temporarily rate-limited upstream", ...) with the provider that
+                # answered; "Provider returned error" alone hides what happened.
+                meta = error.get("metadata")
+                if isinstance(meta, dict):
+                    if meta.get("provider_name"):
+                        message += f" [provider {meta['provider_name']}]"
+                    if meta.get("raw"):
+                        message += f": {str(meta['raw'])[:300]}"
             elif error:
                 message = str(error)
         sent_knobs = sorted(k for k in body if k in self.config.knobs)

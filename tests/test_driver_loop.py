@@ -672,3 +672,32 @@ def test_probe_loop_cli(tmp_path, fake_openrouter, capsys, monkeypatch):
 def test_smoke_loop_manifest_loads():
     manifest = load_manifest(Path(__file__).resolve().parents[1] / "examples" / "smoke" / "loop-prompts.json")
     assert all(cell["driver"] == "loop" for cell in manifest.cells.values())
+
+
+def test_broken_probe_is_not_cached(tmp_path, fake_openrouter):
+    fake = fake_openrouter
+    fake.status_sequence = [503, 503, 503]  # the probe's request and both retries
+    config = loop_config(tmp_path, loop_manifest())
+    result = run(config)
+    assert result.results == [] and "loop-cell" in result.voided_cells
+    probe = json.loads((config.run_dir / "loop-cell" / "loop-probe" / "probe.json").read_text())
+    assert probe["verdict"] == "broken" and "HTTP 503" in probe["detail"]
+    assert list((tmp_path / "probe-cache").glob("*.json")) == []
+    # Next time the pair is probed again, and passes.
+    again = loop_config(tmp_path, loop_manifest(), run_dir=tmp_path / "run2")
+    result = run(again)
+    assert result.failures == 0 and len(fake.probe_requests) == 4
+
+
+def test_upstream_error_metadata_is_surfaced(tmp_path, fake_openrouter):
+    from mcp_e2e_harness.loop_consumer import ChatClient, LoopError, TurnConfig
+
+    config = TurnConfig(api_base=fake_openrouter.url + "/api/v1", api_key_env="OPENROUTER_API_KEY", model=MODEL,
+                        knobs={}, provider=provider_block(PIN, "deny"), provider_pin=PIN,
+                        pinned_provider_names=[PROVIDER], scaffold="loop-scaffold@1", mode="turn",
+                        result_path=str(tmp_path / "r.json"))
+    client = ChatClient(config, log=lambda m: None)
+    payload = {"error": {"message": "Provider returned error", "code": 429,
+                         "metadata": {"raw": "temporarily rate-limited upstream", "provider_name": "Mistral"}}}
+    with pytest.raises(LoopError, match="Mistral.*rate-limited upstream"):
+        client._raise_for_error(429, payload, {"provider": {}})

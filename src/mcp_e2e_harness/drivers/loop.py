@@ -399,11 +399,18 @@ class LoopDriver(Driver):
                                    f"{cached.get('detail')}. The cell is instrument-broken; delete "
                                    f"{cache_path} to re-probe.")}
         record = self._run_probe(cell, dest, timeout_s, scan, log, tuple_)
-        cache_path.write_text(json.dumps({"tuple": tuple_, "verdict": record["verdict"],
-                                          "detail": record["detail"], "probed_at": record["probed_at"],
-                                          "served_provider": record["served_provider"],
-                                          "probe_dir": str(dest)}, indent=2) + "\n")
-        record["cache_path"] = str(cache_path)
+        # Only a verdict ABOUT the tuple is cached: pass or fail. "broken" means the
+        # probe could not measure (an upstream 429/5xx after retries, a timeout) --
+        # a property of the moment, not of the pair -- so it refuses this cell now
+        # and is probed again next time.
+        if record["verdict"] in (PROBE_PASS, "fail"):
+            cache_path.write_text(json.dumps({"tuple": tuple_, "verdict": record["verdict"],
+                                              "detail": record["detail"], "probed_at": record["probed_at"],
+                                              "served_provider": record["served_provider"],
+                                              "probe_dir": str(dest)}, indent=2) + "\n")
+            record["cache_path"] = str(cache_path)
+        else:
+            record["cache_path"] = None
         if record["verdict"] == PROBE_PASS:
             return {"ok": True, "reason": None, "record": record, "cost_usd": record["cost_usd"]}
         return {"ok": False, "record": record, "cost_usd": record["cost_usd"],
