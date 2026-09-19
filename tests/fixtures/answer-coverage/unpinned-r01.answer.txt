@@ -1,0 +1,74 @@
+**Public Law 118‑31 – National Defense Authorization Act for Fiscal Year 2024**  
+
+The law is very large (≈ 3.59 million characters, ≈ 3.6 MB of text). The U.S. Government Publishing Office provides the complete text in a single downloadable PDF, and the GovInfo API lets you retrieve the full text in chunks if you need it programmatically.
+
+Below are the two most practical ways to obtain the entire law:
+
+---
+
+### 1. Direct PDF download (full, official version)
+
+| Item | Value |
+|------|-------|
+| **Citation** | Public Law 118‑31 |
+| **Congress** | 118th |
+| **Law number** | 31 |
+| **Date enacted** | December 22 2023 |
+| **GovInfo package ID** | `PLAW-118publ31` |
+| **PDF link** | <https://api.govinfo.gov/packages/PLAW-118publ31/pdf> |
+
+Click the link to download the complete PDF, which contains the entire text of the act (including all divisions, titles, subtitles, sections, and notes).
+
+---
+
+### 2. Retrieve the text via the GovInfo API (chunked)
+
+If you need the raw text (e.g., for search‑indexing or text‑analysis), you can use the `get_public_law` endpoint. The API returns the text in windows of up to 20 000 characters (you can request larger windows by increasing `max_chars`).  
+
+**Example request (first 20 000 characters):**
+
+```http
+GET https://api.govinfo.gov/packages/PLAW-118publ31
+```
+
+**Response highlights (truncated to first 20 000 chars):**
+
+```
+[118th Congress Public Law 31]
+[From the U.S. Government Publishing Office]
+
+[NATIONAL DEFENSE AUTHORIZATION ACT FOR FISCAL YEAR 2024]
+
+Public Law 118‑31
+118th Congress
+
+An Act
+To authorize appropriations for fiscal year 2024 for military activities
+...
+SEC. 1. SHORT TITLE.
+...
+SEC. 2. ORGANIZATION OF ACT INTO DIVISIONS; TABLE OF CONTENTS.
+...
+(continues for ~3.6 million characters)
+```
+
+To get subsequent portions, pass the `start_char` parameter with the value returned as `next_start_char` in the previous response. Example for the next window:
+
+```json
+{
+  "citation": "Public Law 118-31",
+  "start_char": 20000,
+  "max_chars": 20000
+}
+```
+
+Repeat until the `truncated` flag is `false`. The final response will give you the complete plain‑text version.
+
+---
+
+### TL;DR
+
+- **Full official PDF:** <https://api.govinfo.gov/packages/PLAW-118publ31/pdf>  
+- **Programmatic text access:** Use the GovInfo `get_public_law` API with `citation: "Public Law 118-31"` and paginate through the content using `start_char`/`max_chars`.
+
+If you need a specific section or excerpt, let me know and I can fetch that exact slice for you.

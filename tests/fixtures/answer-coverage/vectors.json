@@ -1,0 +1,28 @@
+{
+  "_about": "documentation/40-instruments.md, answer-coverage@1 reference vectors, verbatim (2026-09-18). Keys mirror the table columns; 'reference' names the reference fixture file.",
+  "reference_pointer": "/response/structuredContent/text/content",
+  "vectors": [
+    {"slug": "pinned-r09", "floor": 64, "reference": "PLAW-118publ31.window-0-20000.reference.txt",
+     "reference_chars_raw": 20081, "reference_chars_normalized": 17748, "answer_chars_raw": 7429,
+     "spans": 2, "matched_chars": 5997, "furthest_offset": 6767, "share": 0.3379},
+    {"slug": "pinned-r09", "floor": 40, "reference": "PLAW-118publ31.window-0-20000.reference.txt",
+     "reference_chars_raw": 20081, "reference_chars_normalized": 17748, "answer_chars_raw": 7429,
+     "spans": 2, "matched_chars": 5997, "furthest_offset": 6767, "share": 0.3379},
+    {"slug": "floor-crowded", "floor": 64, "reference": "PLAW-118publ31.window-0-20000.reference.txt",
+     "reference_chars_raw": 20081, "reference_chars_normalized": 17748, "answer_chars_raw": 7093,
+     "spans": 3, "matched_chars": 5858, "furthest_offset": 6767, "share": 0.3301},
+    {"slug": "pinned-r01", "floor": 64, "reference": "PLAW-118publ31.window-0-20000.reference.txt",
+     "reference_chars_raw": 20081, "reference_chars_normalized": 17748, "answer_chars_raw": 20229,
+     "spans": 19, "matched_chars": 17463, "furthest_offset": 19958, "share": 0.9839},
+    {"slug": "unpinned-r01", "floor": 64, "reference": "PLAW-118publ31.window-0-20000.reference.txt",
+     "reference_chars_raw": 20081, "reference_chars_normalized": 17748, "answer_chars_raw": 2505,
+     "spans": 3, "matched_chars": 241, "furthest_offset": 1048, "share": 0.0136},
+    {"slug": "unpinned-r01", "floor": 40, "reference": "PLAW-118publ31.window-0-20000.reference.txt",
+     "reference_chars_raw": 20081, "reference_chars_normalized": 17748, "answer_chars_raw": 2505,
+     "spans": 4, "matched_chars": 296, "furthest_offset": 1048, "share": 0.0167},
+    {"slug": "claude-code-summary", "floor": 64, "reference": "PLAW-118publ31.window-0-100000.reference.txt",
+     "reference_chars_raw": 100082, "reference_chars_normalized": 88873, "answer_chars_raw": 1251,
+     "spans": 0, "matched_chars": 0, "furthest_offset": 0, "share": 0.0}
+  ],
+  "claude_code_summary_floor_40_note": "at floor 40 a 55-character heading matches (1 span, 55) -- the case the floor exists for"
+}

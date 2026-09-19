@@ -1,0 +1,9 @@
+This is Public Law 118-31, the **National Defense Authorization Act for Fiscal Year 2024** (enacted Dec. 22, 2023, H.R. 2670) — it's **3,590,552 characters** long (roughly a 600+ page law spanning 7 divisions: DoD authorizations, military construction, DOE national security, funding tables, other matters, State Department authorization, and Intelligence Authorization).
+
+Given the size, I can't paste the full text into one response — it would take ~36 separate tool calls and dwarf any reasonable chat output. A few options:
+
+1. **I fetch it in full and write it to a local file** on disk for you to reference (fastest to produce, fully complete).
+2. **You tell me a specific division/section/topic** you actually need (e.g., "Division A, Title VI - personnel," or "the pay raise provision"), and I pull just that with targeted `find`/windowed calls.
+3. **You want the official PDF** — GovInfo has it at the source link (I won't paste a URL per policy, but can confirm the govinfo package id `PLAW-118publ31` if you want to fetch it yourself).
+
+Which would you like? Given it's a 3.5M-character defense bill, option 2 (narrowing to what you actually need) is almost certainly more useful than a raw full dump — let me know what you're looking for.

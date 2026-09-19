@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from . import crowding
+from . import crowding, measurements
 from .loop_scaffold import SCAFFOLDS
 from .openrouter import DATA_POLICIES, DEPLOYMENTS, RESERVED_REQUEST_KEYS, parse_pin
 from .secrets import is_secret_ref
@@ -281,7 +281,7 @@ def _validate_prompt(i: int, entry: Any, fixtures: dict, rubrics: dict) -> str:
 def validate_manifest(data: Any) -> None:
     data = _obj(data, "(top level)")
     _check_keys(data, "(top level)", ("suite", "server", "cells", "prompts"),
-                ("fixtures", "rubrics", "checks"))
+                ("fixtures", "rubrics", "checks", "measurements"))
 
     suite = _obj(data["suite"], "suite")
     _check_keys(suite, "suite", ("name", "spec", "manifest_version"))
@@ -331,6 +331,21 @@ def validate_manifest(data: Any) -> None:
             check_ids.add(cid)
         # Everything else about a check is validated at evaluation time, where a
         # malformed rule gets the language's own 'error' outcome (30-checks.md).
+
+    # Row measurements (30-checks.md, "Row measurements"): unlike checks, a malformed
+    # declaration is a load error -- a measurement has no 'error' outcome to report
+    # under, because it has no outcomes at all.
+    declared = data["measurements"] if _given(data, "measurements") else []
+    if not isinstance(declared, list):
+        _fail("measurements", "must be a list of measurement declarations (schema in documentation/30-checks.md)")
+    names: set[str] = set()
+    for i, entry in enumerate(declared):
+        problem = measurements.declaration_error(entry)
+        if problem:
+            _fail(f"measurements[{i}]", problem)
+        if entry["name"] in names:
+            _fail(f"measurements[{i}]", f"duplicate measurement name {entry['name']!r}")
+        names.add(entry["name"])
 
     # Cross-references from cells into prompts.
     by_id = {p["id"]: p for p in prompts}
@@ -386,6 +401,10 @@ class Manifest:
     @property
     def fixtures(self) -> dict:
         return self.data.get("fixtures") or {}
+
+    @property
+    def measurements(self) -> list[dict]:
+        return self.data.get("measurements") or []
 
     def prompt_by_id(self, pid: str) -> dict | None:
         return next((p for p in self.prompts if p["id"] == pid), None)

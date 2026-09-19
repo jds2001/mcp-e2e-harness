@@ -81,6 +81,11 @@ def _tokens(pointer: Any) -> list:
     return out
 
 
+def pointer_tokens(pointer: Any) -> list:
+    """Parse a pointer, raising CheckEvalError on bad syntax (for validators that only need that)."""
+    return _tokens(pointer)
+
+
 def resolve_pointer(doc: Any, pointer: str) -> tuple[bool, list]:
     """Resolve a pointer against a record: (every expanded path exists, values found).
 
@@ -179,6 +184,24 @@ def _predicate_holds(record: dict, pred: Any) -> bool:
         return all(v == pred["equals"] for v in values)
     pattern = _compile(pred["matches"])
     return all(pattern.search(_as_text(v)) for v in values)
+
+
+def selected(record: dict, applies_to: Any) -> bool:
+    """Whether ``applies_to`` (the checks selector) matches ``record``.
+
+    Shared with row measurements (30-checks.md, "Row measurements"): a measurement's
+    ``applies_to`` is this selector, reused rather than reimplemented.
+    """
+    return _selected(record, applies_to)
+
+
+def lint_selector(applies_to: Any) -> str | None:
+    """Structural validation of a selector alone: the error message, or None."""
+    try:
+        _selected(_SAMPLE_RECORD, applies_to)
+    except CheckEvalError as exc:
+        return str(exc)
+    return None
 
 
 # ---------------------------------------------------------------- assertion

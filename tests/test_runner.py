@@ -616,6 +616,56 @@ def test_end_to_end_records_trace_and_checks(tmp_path, fake_drivers):
     assert (config.run_dir / "checks-report.json").exists()
 
 
+def test_row_measurements_are_recorded_per_row_never_as_outcomes(tmp_path, fake_drivers):
+    # 30-checks.md "Row measurements" (S14): computed across the trace record and the
+    # row's answer, recorded in meta.json under measurements.<name> with the method
+    # hash, and absent from checks-report.json's outcomes. The fake consumer's answer
+    # embeds the tool result's serialized JSON, so a low floor finds a real span.
+    declared = [{"name": "answer_coverage", "measure": "answer-coverage@1",
+                 "applies_to": {"tool": "list_unfiled_notes"},
+                 "reference": "/response/content/0/text", "floor": 16},
+                {"name": "unresolvable", "measure": "answer-coverage@1",
+                 "applies_to": {"tool": "*"}, "reference": "/response/content"}]
+    data = manifest_data(checks=checks_for_tests(), measurements=declared)
+    logged: list[str] = []
+    config = config_for(tmp_path, data, fake_drivers, log=logged.append)
+    result = run(config)
+    assert result.failures == 0
+
+    meta = json.loads((config.run_dir / "basic" / "A" / "A1" / "meta.json").read_text())
+    from mcp_e2e_harness.measurements import ANSWER_COVERAGE_V1
+    entries = meta["measurements"]["answer_coverage"]
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["index"] == 0 and entry["tool"] == "list_unfiled_notes"
+    assert entry["method"] == "answer-coverage@1" and entry["method_hash"] == ANSWER_COVERAGE_V1.content_hash()
+    assert entry["reference_pointer"] == "/response/content/0/text" and entry["floor"] == 16
+    assert entry["answer_chars_raw"] == meta["answer_chars"]
+    assert entry["spans"] >= 1 and 0 < entry["share"] <= 1.0
+    assert entry["furthest_offset"] > 0 and entry["reference_chars_raw"] >= entry["reference_chars_normalized"]
+    null_entry = meta["measurements"]["unresolvable"][0]
+    assert null_entry["share"] is None and "not a string" in null_entry["note"]
+
+    report = json.loads((config.run_dir / "checks-report.json").read_text())
+    assert "measurements" not in json.dumps(report["checks"])
+    assert {c["outcome"] for c in report["checks"]} <= {"pass", "fail", "vacuous", "error"}
+    run_manifest = json.loads((config.run_dir / "run-manifest.json").read_text())
+    summary = run_manifest["measurements"]
+    assert summary["answer_coverage"] == {"measure": "answer-coverage@1",
+                                          "method_hash": ANSWER_COVERAGE_V1.content_hash(),
+                                          "rows": 1, "records_measured": 1, "records_null": 0}
+    assert summary["unresolvable"]["records_null"] == 1 and summary["unresolvable"]["records_measured"] == 0
+    assert any(line.startswith("measurement: answer_coverage") and "not an outcome" in line for line in logged)
+
+
+def test_no_declared_measurements_records_an_empty_object(tmp_path, fake_drivers):
+    config = config_for(tmp_path, manifest_data(), fake_drivers)
+    run(config)
+    meta = json.loads((config.run_dir / "basic" / "A" / "A1" / "meta.json").read_text())
+    assert meta["measurements"] == {}
+    assert json.loads((config.run_dir / "run-manifest.json").read_text())["measurements"] == {}
+
+
 def test_environment_state_is_lifted_into_meta_when_the_driver_reports_it(tmp_path, fake_drivers):
     # 50-drivers.md Residual 2: a driver can observe vendor-pushed state that entered
     # its own invocation (e.g. codex's plugin-sync fetch) only after the turn runs.

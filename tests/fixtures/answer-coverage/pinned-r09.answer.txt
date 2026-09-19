@@ -1,0 +1,172 @@
+Below is the beginning of **Public Law 118‑31** (the National Defense Authorization Act for Fiscal Year 2024). The law is 3,590,552 characters long; the excerpt shown includes the first 20,000 characters. To obtain the remainder, you can request additional windows by increasing the `start_char` value (e.g., 20000, 40000, etc.) in subsequent calls to the `get_public_law` tool.
+
+---
+
+**Public Law 118‑31**  
+*118th Congress*  
+
+```
+[WINDOW chars 0–19,999 of 3,590,552 — truncated; continue with start_char=20000]
+[118th Congress Public Law 31]
+[From the U.S. Government Publishing Office]
+
+[[Page 135]]
+
+         NATIONAL DEFENSE AUTHORIZATION ACT FOR FISCAL YEAR 2024
+
+[[Page 137 STAT. 136]]
+
+Public Law 118-31
+118th Congress
+
+                                 An Act
+
+To authorize appropriations for fiscal year 2024 for military activities
+  of the Department of Defense and for military construction, and for
+ defense activities of the Department of Energy, to prescribe military
+        personnel strengths for such fiscal year, and for other
+            purposes. <<NOTE: Dec. 22, 2023 -  [H.R. 2670]>>
+
+    Be it enacted by the Senate and House of Representatives of the
+United States of America in Congress assembled, <<NOTE: National Defense
+Authorization Act for Fiscal Year 2024.>>
+SECTION 1. SHORT TITLE.
+
+    This Act may be cited as the ``National Defense Authorization Act
+for Fiscal Year 2024''.
+SEC. 2. ORGANIZATION OF ACT INTO DIVISIONS; TABLE OF CONTENTS.
+
+    (a) Divisions.--This Act is organized into seven divisions as
+follows:
+            (1) Division A--Department of Defense Authorizations.
+            (2) Division B--Military Construction Authorizations.
+            (3) Division C--Department of Energy National Security
+        Authorizations and Other Authorizations.
+            (4) Division D--Funding Tables.
+            (5) Division E--Other Matters.
+            (6) Division F--Department of State Authorization Act of
+        2023.
+            (7) Division G--Intelligence Authorization Act for Fiscal
+        Year 2024.
+
+    (b) Table of Contents.--The table of contents for this Act is as
+follows:
+
+Sec. 1. Short title.
+Sec. 2. Organization of Act into divisions; table of contents.
+Sec. 3. Congressional defense committees.
+Sec. 4. Budgetary effects of this Act.
+
+            DIVISION A--DEPARTMENT OF DEFENSE AUTHORIZATIONS
+
+                          TITLE I--PROCUREMENT
+
+               Subtitle A--Authorization of Appropriations
+
+Sec. 101. Authorization of appropriations.
+
+                        Subtitle B--Army Programs
+
+Sec. 111. Limitation on availability of funds pending assessment of Army
+           Trackless Moving Target systems.
+Sec. 112. Strategy for Army tactical wheeled vehicle program.
+Sec. 113. Report on acquisition strategies for the logistics
+           augmentation program of the Army.
+
+                        Subtitle C--Navy Programs
+
+Sec. 121. Modification of requirements for minimum number of carrier air
+           wings of the Navy.
+
+[[Page 137 STAT. 137]]
+
+Sec. 122. Extension of prohibition on availability of funds for Navy
+           port waterborne security barriers.
+Sec. 123. Multiyear procurement authority for Virginia class submarine
+           program.
+Sec. 124. Procurement authority for Auxiliary Personnel Lighter program.
+Sec. 125. Limitation on reductions to V-22 aircraft nacelle improvement
+           program.
+Sec. 126.  Limitation on consideration of Government-operated dry docks
+           in certain contract solicitations.
+Sec. 127. Annual reports on use of Government docks for ship repair and
+           maintenance.
+
+                     Subtitle D--Air Force Programs
+
+Sec. 131. Limitation on retirement of F-15 aircraft and modification of
+           related reporting requirement.
+Sec. 132. Limitations and minimum inventory requirement relating to RQ-4
+           aircraft.
+Sec. 133. Temporary exception to minimum inventory requirement for
+           fighter aircraft of the Air Force.
+Sec. 134. Modification of minimum inventory requirements for C-130
+           aircraft.
+Sec. 135. Modification of annual reports on T-7A Advanced Pilot Training
+           System.
+Sec. 136. Modification to prohibition on certain reductions to B-1
+           bomber aircraft squadrons.
+Sec. 137. Modification of minimum inventory requirements for A-10
+           aircraft.
+Sec. 138. Procurement authority for over-the-horizon radar systems.
+Sec. 139. Prohibition on availability of funds for retirement of KC-135
+           aircraft.
+Sec. 140. Prohibition on reduction of KC-135 aircraft in PMAI of the
+           reserve components.
+Sec. 141. Limitation on issuance of acquisition strategy for the KC-135
+           recapitalization program.
+Sec. 142. Prohibition on certain reductions to inventory of E-3 airborne
+           warning and control system aircraft.
+Sec. 143. Prohibition on availability of funds for termination of
+           production lines for the HH-60W aircraft.
+Sec. 144. Limitation on retirement of F-16C/D aircraft.
+Sec. 145. Limitation on procurement of KC-46A aircraft.
+Sec. 146. Limitation on actions relating to remote vision systems of KC-
+           46A aircraft.
+Sec. 147.  Limitation on retirement of T-1A training aircraft.
+Sec. 148. Plan for long-term Air Force fighter force structure.
+
+        Subtitle E--Defense-wide, Joint, and Multiservice Matters
+
+Sec. 151. Annual report on force structure changes exhibit for the
+           defense budget.
+Sec. 152. Multiyear procurement authority for domestically processed
+           critical minerals.
+Sec. 153. Prohibition on solicitation of proprietary armor for certain
+           tactical vehicles.
+Sec. 154. Prohibition on availability of funds for procurement of
+           certain batteries.
+
+          TITLE II--RESEARCH, DEVELOPMENT, TEST, AND EVALUATION
+
+               Subtitle A--Authorization of Appropriations
+
+Sec. 201. Authorization of appropriations.
+
+     Subtitle B--Program Requirements, Restrictions, and Limitations
+
+Sec. 211. Annual report on unfunded priorities of the Under Secretary of
+           Defense for Research and Engineering.
+Sec. 212. Delegation of responsibility for certain research programs.
+Sec. 213. Modification to personnel management authority to attract
+           experts in science and engineering.
+Sec. 214. Clarifying role of partnership intermediaries to promote
+           defense research and education.
+Sec. 215. Naval Air Warfare Rapid Capabilities Office.
+Sec. 216. Modification of support for research and development of
+           bioindustrial manufacturing processes.
+Sec. 217. Modification to administration of the Advanced Sensors
+           Application Program.
+Sec. 218. Matters pertaining to hypersonic capabilities and testing
+           strategies.
+Sec. 219. Improvements to defense quantum information science and
+           technology research and development program.
+Sec. 220. Application of public‑private talent exchange programs in the
+           Department of Defense to quantum information sciences and
+           technology research.
+Sec. 221. Support for protection of sensitive research performed on
+           behalf of the Department of Defense.
+...
+```
+
+*The excerpt ends at the 20,000‑character mark. To view the remainder of the law, issue additional calls to the `get_public_law` tool with `start_char` set to 20000, 40000, 60000, etc., until the entire text is retrieved.*

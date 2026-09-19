@@ -1,0 +1,432 @@
+**Public Law 118‑31 (National Defense Authorization Act for Fiscal Year 2024)**  
+*118th Congress – Enacted December 22, 2023*  
+
+Below is the beginning of the law (the first 20,000 characters). The full text runs to more than 3.5 million characters; you can retrieve additional portions by calling the same tool with a larger `start_char` (e.g., `start_char=20000`, `40000`, etc.) until the entire document is obtained.
+
+```
+[118th Congress Public Law 31]
+[From the U.S. Government Publishing Office]
+
+[[Page 135]]
+
+         NATIONAL DEFENSE AUTHORIZATION ACT FOR FISCAL YEAR 2024
+
+[[Page 137 STAT. 136]]
+
+Public Law 118-31
+118th Congress
+
+                                 An Act
+
+To authorize appropriations for fiscal year 2024 for military activities
+  of the Department of Defense and for military construction, and for
+ defense activities of the Department of Energy, to prescribe military
+        personnel strengths for such fiscal year, and for other
+            purposes. <<NOTE: Dec. 22, 2023 -  [H.R. 2670]>>
+
+    Be it enacted by the Senate and House of Representatives of the
+United States of America in Congress assembled, <<NOTE: National Defense
+Authorization Act for Fiscal Year 2024.>>
+SECTION 1. SHORT TITLE.
+
+    This Act may be cited as the ``National Defense Authorization Act
+for Fiscal Year 2024''.
+SEC. 2. ORGANIZATION OF ACT INTO DIVISIONS; TABLE OF CONTENTS.
+
+    (a) Divisions.--This Act is organized into seven divisions as
+ follows:
+            (1) Division A--Department of Defense Authorizations.
+            (2) Division B--Military Construction Authorizations.
+            (3) Division C--Department of Energy National Security
+        Authorizations and Other Authorizations.
+            (4) Division D--Funding Tables.
+            (5) Division E--Other Matters.
+            (6) Division F--Department of State Authorization Act of
+        2023.
+            (7) Division G--Intelligence Authorization Act for Fiscal
+        Year 2024.
+
+    (b) Table of Contents.--The table of contents for this Act is as
+ follows:
+
+Sec. 1. Short title.
+Sec. 2. Organization of Act into divisions; table of contents.
+Sec. 3. Congressional defense committees.
+Sec. 4. Budgetary effects of this Act.
+
+            DIVISION A--DEPARTMENT OF DEFENSE AUTHORIZATIONS
+
+                          TITLE I--PROCUREMENT
+
+               Subtitle A--Authorization of Appropriations
+
+Sec. 101. Authorization of appropriations.
+
+                        Subtitle B--Army Programs
+
+Sec. 111. Limitation on availability of funds pending assessment of Army
+           Trackless Moving Target systems.
+Sec. 112. Strategy for Army tactical wheeled vehicle program.
+Sec. 113. Report on acquisition strategies for the logistics
+           augmentation program of the Army.
+
+                        Subtitle C--Navy Programs
+
+Sec. 121. Modification of requirements for minimum number of carrier air
+           wings of the Navy.
+
+[[Page 137 STAT. 137]]
+
+Sec. 122. Extension of prohibition on availability of funds for Navy
+           port waterborne security barriers.
+Sec. 123. Multiyear procurement authority for Virginia class submarine
+           program.
+Sec. 124. Procurement authority for Auxiliary Personnel Lighter program.
+Sec. 125. Limitation on reductions to V-22 aircraft nacelle improvement
+           program.
+Sec. 126.  Limitation on consideration of Government-operated dry docks
+           in certain contract solicitations.
+Sec. 127. Annual reports on use of Government docks for ship repair and
+           maintenance.
+
+                     Subtitle D--Air Force Programs
+
+Sec. 131. Limitation on retirement of F-15 aircraft and modification of
+           related reporting requirement.
+Sec. 132. Limitations and minimum inventory requirement relating to RQ-4
+           aircraft.
+Sec. 133. Temporary exception to minimum inventory requirement for
+           fighter aircraft of the Air Force.
+Sec. 134. Modification of minimum inventory requirements for C-130
+           aircraft.
+Sec. 135. Modification of annual reports on T-7A Advanced Pilot Training
+           System.
+Sec. 136. Modification to prohibition on certain reductions to B-1
+           bomber aircraft squadrons.
+Sec. 137. Modification of minimum inventory requirements for A-10
+           aircraft.
+Sec. 138. Procurement authority for over-the-horizon radar systems.
+Sec. 139. Prohibition on availability of funds for retirement of KC-135
+           aircraft.
+Sec. 140. Prohibition on reduction of KC-135 aircraft in PMAI of the
+           reserve components.
+Sec. 141. Limitation on issuance of acquisition strategy for the KC-135
+           recapitalization program.
+Sec. 142. Prohibition on certain reductions to inventory of E-3 airborne
+           warning and control system aircraft.
+Sec. 143. Prohibition on availability of funds for termination of
+           production lines for the HH-60W aircraft.
+Sec. 144. Limitation on retirement of F-16C/D aircraft.
+Sec. 145. Limitation on procurement of KC-46A aircraft.
+Sec. 146. Limitation on actions relating to remote vision systems of KC-
+           46A aircraft.
+Sec. 147.  Limitation on retirement of T-1A training aircraft.
+Sec. 148. Plan for long-term Air Force fighter force structure.
+
+        Subtitle E--Defense-wide, Joint, and Multiservice Matters
+
+Sec. 151. Annual report on force structure changes exhibit for the
+           defense budget.
+Sec. 152. Multiyear procurement authority for domestically processed
+           critical minerals.
+Sec. 153. Prohibition on solicitation of proprietary armor for certain
+           tactical vehicles.
+Sec. 154. Prohibition on availability of funds for procurement of
+           certain batteries.
+
+          TITLE II--RESEARCH, DEVELOPMENT, TEST, AND EVALUATION
+
+               Subtitle A--Authorization of Appropriations
+
+Sec. 201. Authorization of appropriations.
+
+     Subtitle B--Program Requirements, Restrictions, and Limitations
+
+Sec. 211. Annual report on unfunded priorities of the Under Secretary of
+           Defense for Research and Engineering.
+Sec. 212. Delegation of responsibility for certain research programs.
+Sec. 213. Modification to personnel management authority to attract
+           experts in science and engineering.
+Sec. 214. Clarifying role of partnership intermediaries to promote
+           defense research and education.
+Sec. 215. Naval Air Warfare Rapid Capabilities Office.
+Sec. 216. Modification of support for research and development of
+           bioindustrial manufacturing processes.
+Sec. 217. Modification to administration of the Advanced Sensors
+           Application Program.
+Sec. 218. Matters pertaining to hypersonic capabilities and testing
+           strategies.
+Sec. 219. Improvements to defense quantum information science and
+           technology research and development program.
+Sec. 220. Application of public‑private talent exchange programs in the
+           Department of Defense to quantum information sciences and
+           technology research.
+Sec. 221. Support for protection of sensitive research performed on
+           behalf of the Department of Defense.
+
+[[Page 137 STAT. 138]]
+
+Sec. 222. Support to the Defence Innovation Accelerator for the North
+           Atlantic.
+Sec. 223. Consortium on use of additive manufacturing for defense
+           capability development.
+Sec. 224. Next Generation Air Dominance family of systems development
+           program accountability matrices.
+Sec. 225. Continuous capability development and delivery program for F-
+           35 aircraft.
+Sec. 226. F-35 propulsion and thermal management modernization program.
+Sec. 227. Establishment or expansion of University Affiliated Research
+           Centers for critical materials.
+Sec. 228. Policies for management and certification of Link 16 military
+           tactical data link network.
+Sec. 229. Rapid response to emergent technology advancements or threats.
+Sec. 230. Pilot program to commercialize prototypes of the Department of
+           the Air Force.
+Sec. 231. Pilot program on near‑term quantum computing applications.
+Sec. 232. Pilot program to facilitate access to advanced technology
+           developed by small businesses for ground vehicle systems of
+           the Army.
+Sec. 233. Limitation on availability of funds pending documentation on
+           Future Attack Reconnaissance Aircraft program.
+
+           Subtitle C--Energetics and Other Munitions Matters
+
+Sec. 241. Joint Energetics Transition Office.
+Sec. 242. Consideration of lethality in the analysis of alternatives for
+           munitions.
+Sec. 243. Pilot program on incorporation of the CL20 compound in certain
+           weapon systems.
+Sec. 244. Limitation on sourcing chemical materials for munitions from
+           certain countries.
+Sec. 245. Defense industrial base munition surge capacity critical
+           reserve.
+
+              Subtitle D--Plans, Reports, and Other Matters
+
+Sec. 251. Congressional notification of changes to Department of Defense
+           policy on autonomy in weapon systems.
+Sec. 252. Audit to identify diversion of Department of Defense funding
+           to China's research labs.
+Sec. 253. Annual review of status of implementation plan for digital
+           engineering career tracks.
+
+                  TITLE III--OPERATION AND MAINTENANCE
+
+               Subtitle A--Authorization of Appropriations
+
+Sec. 301. Authorization of appropriations.
+
+                   Subtitle B--Energy and Environment
+
+Sec. 311. Improvement and codification of Sentinel Landscapes
+           Partnership program authority.
+Sec. 312. Modification of authority for environmental restoration
+           projects at National Guard facilities.
+Sec. 313. Modification to technical assistance authority for
+           environmental restoration activities.
+Sec. 314. Coordination on agreements to limit encroachments and other
+           constraints on military training, testing, and operations.
+Sec. 315. Requirement for approval by Under Secretary of Defense for
+           Acquisition and Sustainment of waiver for systems not meeting
+           fuel efficiency key performance parameter.
+Sec. 316. Modification to prototype and demonstration projects for
+           energy resilience at certain military installations.
+Sec. 317. Authority to transfer certain funds as payment relating to
+           Naval Air Station, Moffett Field, California.
+Sec. 318. Prohibition on required disclosure by Department of Defense
+           contractors of information relating to greenhouse gas
+           emissions.
+Sec. 319. Required infrastructure plan prior to deployment of certain
+           non‑tactical vehicles at military installations.
+Sec. 320. Prohibition and report requirement relating to certain energy
+           programs of Department of Defense.
+Sec. 321. Report on schedule and cost estimates for completion of
+           testing and remediation of contaminated sites; publication of
+           cleanup information.
+
+ Subtitle C--Treatment of Perfluoroalkyl Substances and Polyfluoroalkyl
+                               Substances
+
+Sec. 331. Modification of timing of report on activities of PFAS Task
+           Force.
+Sec. 332. Budget justification document for funding relating to
+           perfluoroalkyl substances and polyfluoroalkyl substances.
+Sec. 333. Increase of transfer authority for funding of study and
+           assessment on health implications of perfluoroalkyl
+           substances or polyfluoroalkyl substances contamination in
+           drinking water by Agency for Toxic Substances and Disease
+           Registry.
+Sec. 334. Prizes for development of technology for thermal destruction
+           of perfluoroalkyl substances or polyfluoroalkyl substances.
+Sec. 335. Treatment of certain materials contaminated with
+           perfluoroalkyl substances or polyfluoroalkyl substances.
+Sec. 336. Government Accountability Office reports on testing and
+           remediation of perfluoroalkyl substances and polyfluoroalkyl
+           substances.
+
+                  Subtitle D--Logistics and Sustainment
+
+Sec. 341.  Modification of rule of construction regarding provision of
+           support and services to non‑Department of Defense
+           organizations and activities.
+Sec. 342. Repeal of Comptroller General review requirement relating to
+           core logistics capabilities.
+Sec. 343. Modifications to Contested Logistics Working Group of
+           Department of Defense.
+Sec. 344. Matters relating to briefings on Shipyard Infrastructure
+           Optimization Program of the Navy.
+Sec. 345. Foreign military sales exclusion in calculation for certain
+           workload carryover of Department of the Army.
+Sec. 346. Pilot program on optimization of aerial refueling and fuel
+           management in contested logistics environments through use of
+           artificial intelligence.
+Sec. 347. Limitation on availability of funds to expand leased
+           facilities for Joint Military Information Support Operations
+           Web Operations Center.
+Sec. 348. Limitation on availability of funds pending submission of
+           certain 30‑year shipbuilding plan by the Secretary of the
+           Navy.
+Sec. 349. Plan regarding condition and maintenance of prepositioned
+           stockpiles of the Army.
+Sec. 350. Strategy and assessment on use of automation and artificial
+           intelligence for shipyard optimization.
+Sec. 351. Assessment and strategy relating to hardening of certain
+           military installations against attack by Iran and Iranian-
+           associated groups.
+Sec. 352. Semiannual briefings on operational status of amphibious
+           warship fleet.
+
+                        Subtitle E--Other Matters
+
+Sec. 361. Review of notice of presumed risk issued by Military Aviation
+           and Installation Assurance Clearinghouse.
+Sec. 362. Modifications to military aviation and installation assurance
+           clearinghouse for review of mission obstructions.
+Sec. 363. Modification to Joint Safety Council.
+Sec. 364. Designation of official responsible for coordination of
+           renegotiation of certain land leases owned by Department of
+           Defense in Hawaii.
+Sec. 365. Continued designation of Secretary of the Navy as executive
+           agent for Naval Small Craft Instruction and Technical
+           Training School.
+Sec. 366. Establishment of Caisson Platoon and support for military and
+           State funeral services at Arlington National Cemetery.
+Sec. 367. Recovery of rare earth elements and other strategic and
+           critical materials through end‑of‑life equipment recycling.
+
+               TITLE IV--MILITARY PERSONNEL AUTHORIZATIONS
+
+                        Subtitle A--Active Forces
+
+Sec. 401. End strengths for active forces.
+Sec. 402. End strength level matters.
+
+                       Subtitle B--Reserve Forces
+
+Sec. 411. End strengths for Selected Reserve.
+Sec. 412. End strengths for Reserves on active duty in support of the
+           Reserves.
+Sec. 413. End strengths for military technicians (dual status).
+Sec. 414. Maximum number of reserve personnel authorized to be on active
+           duty for operational support.
+
+               Subtitle C--Authorization of Appropriations
+
+Sec. 421. Military personnel.
+
+                   TITLE V--MILITARY PERSONNEL POLICY
+
+                       Subtitle A--Officer Policy
+
+Sec. 501. Authorized strength: general and flag officers on active duty.
+Sec. 502. Extension of active duty term for Attending Physician at
+           United States Capitol.
+Sec. 503. Updating authority to authorize promotion transfers between
+           components of the same Armed Force or a different Armed
+           Force.
+Sec. 504. Flexibility in determining terms of appointment for certain
+           senior officer positions.
+Sec. 505. Realignment of Navy spot‑promotion quotas.
+Sec. 506. Authority to increase the number of medical and dental
+           officers recommended for promotion to certain grades.
+Sec. 507. Prohibition on appointment or nomination of certain officers
+           who are subject to special selection review boards.
+Sec. 508. Effect of failure of selection for promotion.
+Sec. 509. Improvements relating to service obligation for Marine Corps
+           cyberspace operations officers.
+Sec. 509A. Time in grade requirements.
+Sec. 509B. Establishment of Legislative Liaison of the Space Force.
+Sec. 509C. Extension of authority to vary number of Space Force officers
+           considered for promotion to major general.
+Sec. 509D. Briefing on number of general officers of the Space Force on
+           active duty.
+
+                Subtitle B--Reserve Component Management
+
+Sec. 511. Removal of active duty prohibition for members of the Air
+           Force Reserve Policy Committee.
+Sec. 512. Grade of Vice Chief of the National Guard Bureau.
+Sec. 513. Mobilization of Selected Reserve for preplanned missions in
+           support of the combatant commands.
+Sec. 514. Alternative promotion authority for reserve officers in
+           designated competitive categories.
+Sec. 515. Authorization for FireGuard Program.
+Sec. 516. Designation of at least one general officer of the Marine
+           Corps Reserve as a joint qualified officer.
+
+        Subtitle C--General Service Authorities and Prohibitions
+
+Sec. 521. Permanent authority to order retired members to active duty in
+           high‑demand, low‑density appointments.
+Sec. 522. Prohibition on policy of the Department of Defense regarding
+           identification of gender or personal pronouns in official
+           correspondence.
+Sec. 523. Prohibition on former members of the Armed Forces accepting
+           post‑service employment with certain foreign governments.
+Sec. 524. Verification of the financial independence of financial
+           services counselors in the Department of Defense.
+Sec. 525. Modification of requirements for approval of foreign
+           employment by retired and reserve members of uniformed
+           services.
+Sec. 526. Consideration of reinstatement of a member of the Armed Forces
+           involuntarily separated on the basis of refusal to receive a
+           vaccination against COVID‑19.
+Sec. 527. Reviews of characterization of administrative discharges of
+           certain members on the basis of failure to receive COVID‑19
+           vaccine.
+Sec. 528. Certain members discharged or dismissed on the sole basis of
+           failure to obey a lawful order to receive a vaccine for
+           COVID‑19: communication strategy regarding reinstatement
+           process.
+Sec. 529. Continuing military service for certain members eligible for
+           chapter 61 retirement.
+Sec. 529A. Threat‑based security services and equipment for certain
+           former or retired Department of Defense personnel.
+Sec. 529B. Limitation on establishment of new diversity, equity, and
+           inclusion positions; hiring freeze.
+Sec. 529C. Requirement to base military accessions and promotions on
+           merit and performance.
+
+          Subtitle D--Military Justice and Other Legal Matters
+
+Sec. 531. Technical and conforming amendments to the Uniform Code of
+           Military Justice.
+Sec. 532. Establishment of staggered terms for members of the Military
+           Justice Review Panel.
+Sec. 533. Supreme Court review of certain actions of the United States
+           Court of Appeals for the Armed Forces.
+Sec. 534. Additional requirements for initiative to enhance the
+           capability of military criminal investigative organizations
+           to prevent and combat child sexual exploitation.
+Sec. 535. Limitation on availability of funds for relocation of Army CID
+           special agent training course.
+Sec. 536. Study on requirement for unanimous votes for findings in
+           general and special courts‑martial and related milestones for
+           implementation.
+Sec. 537. Study on removal of Sexual Assault Victim Advocates from the
+           chain of command of victims.
+
+             Subtitle E--Accession Standards and Recruitment
+
+Sec. 541. Increased access to potential recruits at secondary schools.
+Sec. 542. Modification of

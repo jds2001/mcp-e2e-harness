@@ -37,6 +37,7 @@ from pathlib import Path
 
 from . import __version__, crowding, distractor
 from . import checks as checks_mod
+from . import measurements as measurements_mod
 from .api_capture import ApiSurfaceRecorder, read_records, summarize, surface_mismatches
 from .drivers import DRIVERS, Driver
 from .drivers.base import TurnContext
@@ -617,6 +618,11 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     tools_path = dest / "available-tools.json"
     recorded_surface = json.loads(tools_path.read_text()) if tools_path.exists() else None
 
+    # Row measurements (30-checks.md, S14): mechanical values across a trace record
+    # and this row's answer, recorded beside the row with the method's name and hash.
+    # Never an outcome; nothing here reaches checks-report.json.
+    row_measurements = measurements_mod.compute_measurements(manifest.measurements, records, answer)
+
     meta = {
         "prompt_id": entry["id"],
         "group": entry["group"],
@@ -659,6 +665,10 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         # A digest of answer.txt (sha256, first 16 hex): the per-cell distinct-answer
         # count in run-manifest.json is computed from these (WO-3).
         "answer_sha256_16": hashlib.sha256(answer.encode("utf-8", "replace")).hexdigest()[:16],
+        # measurements.<name>: one entry per record the declaration's selector matched,
+        # each carrying the method name and content hash beside the values (null
+        # values with a note when the reference pointer does not resolve to a string).
+        "measurements": row_measurements,
         "command": turn.argv,
         "cwd": str(cwd),
         "recorded_tool_surface": recorded_surface,
@@ -1473,6 +1483,20 @@ def run(config: RunConfig) -> RunResult:
         for check in checks_report:
             log(f"check      : {check['id']}: {check['outcome']}  (matched {check['matched']})")
 
+    # Row measurements: a summary of what was recorded, never an outcome (S14).
+    measurement_summary: dict[str, dict] = {}
+    for decl in manifest.measurements:
+        entries = [e for meta in results for e in (meta.get("measurements") or {}).get(decl["name"], [])]
+        measure = measurements_mod.MEASURES[decl["measure"]]
+        measurement_summary[decl["name"]] = {
+            "measure": measure.full_name, "method_hash": measure.content_hash(),
+            "rows": sum(1 for meta in results if (meta.get("measurements") or {}).get(decl["name"])),
+            "records_measured": sum(1 for e in entries if e.get("note") is None),
+            "records_null": sum(1 for e in entries if e.get("note") is not None)}
+        log(f"measurement: {decl['name']} ({measure.full_name} {measure.content_hash()[:16]}): "
+            f"{measurement_summary[decl['name']]['records_measured']} record(s) measured, "
+            f"{measurement_summary[decl['name']]['records_null']} null -- recorded per row, not an outcome")
+
     if budget_stops:
         for stop in budget_stops:
             log(f"budget stop: {stop['scope']} cap ${stop['cap_usd']:.2f} reached "
@@ -1507,6 +1531,9 @@ def run(config: RunConfig) -> RunResult:
         "voided_cells": voided,
         "zero_trace_cell_failures": dead,
         "checks": {c["id"]: c["outcome"] for c in checks_report},
+        # Row measurements recorded per row (meta.json -> measurements.<name>); this is
+        # a count of what was recorded, never an outcome.
+        "measurements": measurement_summary,
         # Family-level records: the pre-run legibility output (estimate, disclosure),
         # per-cell gates (the loop calibration probe), and the S11 marks per cell with
         # the served-provider set and spend actually observed.
