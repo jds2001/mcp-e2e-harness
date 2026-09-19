@@ -79,8 +79,9 @@ def read_lines(path: Path) -> list[dict]:
 SUT_TOOLS = ["mcp__notes_sut__file_note", "mcp__notes_sut__list_unfiled_notes", "mcp__notes_sut__read_note"]
 
 
-def marks_answers_ok(run_dir: Path, cell: str, *, invocations: int, distinct: int) -> bool:
-    answers = json.loads((run_dir / "run-manifest.json").read_text())["cell_marks"][cell]["answers"]
+def marks_answers_ok(run_dir: Path, cell: str, prompt_id: str, *, invocations: int, distinct: int) -> bool:
+    """The per-prompt distinct-answer block (requirement 11 concerns repeats of ONE prompt)."""
+    answers = json.loads((run_dir / "run-manifest.json").read_text())["cell_marks"][cell]["answers"][prompt_id]
     return (answers["invocations"], answers["distinct"], sum(answers["digests"].values())) == (
         invocations, distinct, invocations)
 
@@ -316,7 +317,7 @@ def test_pinned_cell_end_to_end(tmp_path, fake_openrouter):
     assert all(r["finish_reason_note"] is None for r in wire)
     assert loop["finish_reason"] == "stop" and loop["finish_reasons"] == {"tool_calls": 1, "stop": 1}
     assert meta["answer_sha256_16"] and len(meta["answer_sha256_16"]) == 16
-    assert marks_answers_ok(config.run_dir, "loop-cell", invocations=1, distinct=1)
+    assert marks_answers_ok(config.run_dir, "loop-cell", "A1", invocations=1, distinct=1)
     surface = meta["api_surface"]
     assert surface["expected_wire_surface"] == SUT_TOOLS
     assert surface["wire_surface_mismatches"] == []
@@ -666,7 +667,8 @@ def test_product_rows_carry_the_family_mark(tmp_path, fake_drivers):
     assert meta["consumer_limit"] is None
     run_manifest = json.loads((config.run_dir / "run-manifest.json").read_text())
     assert run_manifest["cell_marks"]["basic"]["driver_family"] == "product"
-    assert run_manifest["cell_marks"]["basic"]["answers"]["invocations"] == 1
+    assert run_manifest["cell_marks"]["basic"]["answers"]["A1"]["invocations"] == 1
+    assert run_manifest["cell_marks"]["basic"]["answers_across_prompts"] == {"invocations": 1, "distinct": 1}
     assert run_manifest["loop_cells"] == {}
     report = json.loads((config.run_dir / "checks-report.json").read_text())
     assert report["cells"]["basic"]["driver_family"] == "product" and report["cells"]["basic"]["driver"] == "fake"
@@ -841,7 +843,9 @@ def test_finish_reason_absent_is_null_with_a_note(tmp_path, fake_openrouter):
     assert result.results[0]["loop"]["finish_reason"] == "stop"
 
 
-def test_distinct_answer_count_per_cell(tmp_path, fake_openrouter):
+def test_distinct_answer_count_is_keyed_by_prompt(tmp_path, fake_openrouter):
+    # WO-4 addendum: two prompts whose answers matched is not a repeat of one prompt,
+    # so the block is keyed by prompt id; the cell-wide total is labeled across prompts.
     fake = fake_openrouter
     fake.echo_prompt_in_answer = True
     data = loop_manifest()
@@ -852,12 +856,30 @@ def test_distinct_answer_count_per_cell(tmp_path, fake_openrouter):
     assert result.failures == 0
     run_manifest = json.loads((config.run_dir / "run-manifest.json").read_text())
     answers = run_manifest["cell_marks"]["loop-cell"]["answers"]
-    assert answers["invocations"] == 3 and answers["distinct"] == 2
-    assert sorted(answers["digests"].values()) == [1, 2]
+    assert set(answers) == {"A1", "A2", "A3"}
+    assert all(a["invocations"] == 1 and a["distinct"] == 1 for a in answers.values())
     assert run_manifest["loop_cells"]["loop-cell"]["answers"] == answers
     digests = {m["prompt_id"]: m["answer_sha256_16"] for m in result.results}
     assert digests["A1"] == digests["A3"] != digests["A2"]
-    assert set(answers["digests"]) == {digests["A1"], digests["A2"]}
+    assert {pid: list(a["digests"]) for pid, a in answers.items()} == {pid: [d] for pid, d in digests.items()}
+    assert run_manifest["cell_marks"]["loop-cell"]["answers_across_prompts"] == {"invocations": 3, "distinct": 2}
+
+
+def test_distinct_answers_two_invocations_of_one_prompt_and_one_of_another():
+    # The runner plans one invocation per (cell, prompt) within a run -- repeats of one
+    # prompt come from separate runs -- so the aggregation is exercised directly on
+    # the shape run_one records: one meta per invocation.
+    from mcp_e2e_harness.runner import answers_across_prompts, answers_by_prompt
+
+    results = [{"cell": "c", "prompt_id": "C1", "answer_sha256_16": "aaaa"},
+               {"cell": "c", "prompt_id": "C1", "answer_sha256_16": "bbbb"},
+               {"cell": "c", "prompt_id": "C2", "answer_sha256_16": "aaaa"},  # matches a C1 answer: not a repeat
+               {"cell": "other", "prompt_id": "C1", "answer_sha256_16": "aaaa"},
+               {"cell": "c", "prompt_id": "C3", "answer_sha256_16": None}]  # answerless row: not counted
+    by_prompt = answers_by_prompt(results, "c")
+    assert by_prompt == {"C1": {"invocations": 2, "distinct": 2, "digests": {"aaaa": 1, "bbbb": 1}},
+                         "C2": {"invocations": 1, "distinct": 1, "digests": {"aaaa": 1}}}
+    assert answers_across_prompts(by_prompt) == {"invocations": 3, "distinct": 2}
 
 
 def test_product_cells_carry_the_distinct_answer_count(tmp_path, fake_drivers):
@@ -869,5 +891,7 @@ def test_product_cells_carry_the_distinct_answer_count(tmp_path, fake_drivers):
     config = RC(manifest=manifest, run_dir=tmp_path / "run", cells=["basic"], drivers=fake_drivers,
                 timeout_s=120, log=lambda line: None)
     run(config)
-    answers = json.loads((config.run_dir / "run-manifest.json").read_text())["cell_marks"]["basic"]["answers"]
-    assert answers["invocations"] == 2 and answers["distinct"] == 1
+    marks = json.loads((config.run_dir / "run-manifest.json").read_text())["cell_marks"]["basic"]
+    assert marks["answers"]["A1"]["invocations"] == 1 and marks["answers"]["A2"]["invocations"] == 1
+    assert marks["answers"]["A1"]["digests"] == marks["answers"]["A2"]["digests"]
+    assert marks["answers_across_prompts"] == {"invocations": 2, "distinct": 1}

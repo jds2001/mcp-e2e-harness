@@ -709,6 +709,32 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     return meta
 
 
+def answers_by_prompt(results: list[dict], cell_name: str) -> dict[str, dict]:
+    """The distinct-answer count per prompt id within one cell (loop requirement 11, WO-3/WO-4).
+
+    Requirement 11 concerns repeats of *one* prompt, so the count is keyed by prompt id:
+    ``{"C1": {"invocations": n, "distinct": d, "digests": {sha16: count}}, ...}``. A
+    digest map, so a reader sees which rows repeat without opening answer files. The
+    across-prompts total lives beside it under its own clearly labeled key, never here.
+    """
+    digests: dict[str, dict[str, int]] = {}
+    for meta in results:
+        if meta["cell"] != cell_name or meta.get("answer_sha256_16") is None:
+            continue
+        per_prompt = digests.setdefault(meta["prompt_id"], {})
+        per_prompt[meta["answer_sha256_16"]] = per_prompt.get(meta["answer_sha256_16"], 0) + 1
+    return {pid: {"invocations": sum(d.values()), "distinct": len(d), "digests": d}
+            for pid, d in digests.items()}
+
+
+def answers_across_prompts(by_prompt: dict[str, dict]) -> dict:
+    """The cell-level total over every prompt: labeled as such because two prompts whose
+    answers matched is not a repeat of one prompt."""
+    union = {digest for entry in by_prompt.values() for digest in entry["digests"]}
+    return {"invocations": sum(entry["invocations"] for entry in by_prompt.values()),
+            "distinct": len(union)}
+
+
 def zero_trace_cells(results: list[dict], dry_run: bool) -> list[str]:
     """Cells where every invocation recorded zero trace records: BROKEN instruments.
 
@@ -1429,14 +1455,11 @@ def run(config: RunConfig) -> RunResult:
     for cell_name in config.cells:
         cell = manifest.cells[cell_name]
         marks = config.drivers[cell["driver"]].cell_marks(cell)
-        # Distinct answers across the cell's invocations (WO-3): the determinism
-        # question is not loop-specific, so every cell carries it. A digest map, so a
-        # reader sees which rows repeat without opening answer files.
-        digests: dict[str, int] = {}
-        for meta in results:
-            if meta["cell"] == cell_name and meta.get("answer_sha256_16") is not None:
-                digests[meta["answer_sha256_16"]] = digests.get(meta["answer_sha256_16"], 0) + 1
-        marks["answers"] = {"invocations": sum(digests.values()), "distinct": len(digests), "digests": digests}
+        # Distinct answers per prompt within the cell (WO-3, keyed by prompt per the
+        # WO-4 addendum): the determinism question is not loop-specific, so every cell
+        # carries it. The across-prompts total is labeled as exactly that.
+        marks["answers"] = answers_by_prompt(results, cell_name)
+        marks["answers_across_prompts"] = answers_across_prompts(marks["answers"])
         if "scaffold" not in marks:
             cell_marks[cell_name] = marks  # product family: the family mark plus answers
             continue
