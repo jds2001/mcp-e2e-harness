@@ -40,6 +40,8 @@ class FakeOpenRouter:
         self.cost_per_request: float | None = 0.001
         self.status_sequence: list[int] = []             # forced statuses, consumed in order
         self.context_limit_tokens: int | None = None      # 400 once a request (bytes/2.83) exceeds it
+        self.answer_finish_reason = "stop"                # finish_reason on a final answer
+        self.echo_prompt_in_answer = False                # append the last user text to the answer
         self.reasoning_tokens = 3
         self.models = [{"id": MODEL, "pricing": {"prompt": "0.00000015", "completion": "0.0000006"},
                         "supported_parameters": ["tools", "max_tokens", "reasoning", "temperature"]}]
@@ -176,14 +178,19 @@ class FakeOpenRouter:
                            "tool_calls": [{"id": f"call_{index}", "type": "function",
                                            "function": {"name": target, "arguments": self.tool_arguments}}]}
         else:
-            message = {"role": "assistant", "content": self.answer_text}
+            text = self.answer_text
+            if self.echo_prompt_in_answer:
+                last_user = next((m["content"] for m in reversed(messages) if m.get("role") == "user"), "")
+                text = f"{text} [{last_user}]"
+            message = {"role": "assistant", "content": text}
         usage = {"prompt_tokens": 100 + 10 * len(messages), "completion_tokens": 20,
                  "completion_tokens_details": {"reasoning_tokens": self.reasoning_tokens}}
         if self.cost_per_request is not None:
             usage["cost"] = self.cost_per_request
         payload = {"id": f"gen-{index}", "model": body.get("model"), "object": "chat.completion",
                    "choices": [{"index": 0, "message": message,
-                                "finish_reason": "tool_calls" if message.get("tool_calls") else "stop"}],
+                                "finish_reason": ("tool_calls" if message.get("tool_calls")
+                                                  else self.answer_finish_reason)}],
                    "usage": usage}
         if provider is not None:
             payload["provider"] = provider

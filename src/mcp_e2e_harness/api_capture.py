@@ -33,8 +33,10 @@ requirements 4 and 6) -- the OpenAI-compatible chat-completions endpoint, with f
 scalars: the served ``provider`` string and four usage numbers (``usage.prompt_tokens``,
 ``usage.completion_tokens``, ``usage.completion_tokens_details.reasoning_tokens``,
 ``usage.cost``), recorded under ``provider`` and ``usage_prompt_tokens`` /
-``usage_completion_tokens`` / ``usage_reasoning_tokens`` / ``usage_cost``. Each is
-null with a ``<key>_note`` when absent or unreadable. Extraction decodes whatever
+``usage_completion_tokens`` / ``usage_reasoning_tokens`` / ``usage_cost``; and -- the
+sixth entry, added 2026-09-18 for WO-3 (a scorer separating cap-cut from self-cut rows
+by the recorded reason, not by token-count inference) -- ``choices[0].finish_reason``
+under ``finish_reason``. Each is null with a ``<key>_note`` when absent or unreadable. Extraction decodes whatever
 response encoding the driver negotiated; an encoding the recorder cannot decode
 leaves the scalar null with the encoding named and is counted in the digest as an
 unread call -- a failed read is never recorded as an absent call (DR-3). Nothing
@@ -126,14 +128,18 @@ def _extract_tool_names(payload: dict) -> tuple[list[str] | None, str | None]:
 @dataclass(frozen=True)
 class ScalarExtraction:
     """One allowlisted response scalar: the record key it lands under, the path into
-    the response JSON object, and whether it is a number or a string."""
+    the response JSON object (string keys into objects, integers into arrays), and
+    whether it is a number or a string."""
     key: str
-    pointer: tuple[str, ...]
+    pointer: tuple[str | int, ...]
     kind: str  # "number" | "string"
 
     @property
     def path(self) -> str:
-        return ".".join(self.pointer)
+        out = ""
+        for token in self.pointer:
+            out += f"[{token}]" if isinstance(token, int) else (f".{token}" if out else token)
+        return out
 
 
 @dataclass(frozen=True)
@@ -169,6 +175,7 @@ RESPONSE_SCALAR_ALLOWLIST: dict[str, AllowlistedEndpoint] = {
             ScalarExtraction("usage_reasoning_tokens",
                              ("usage", "completion_tokens_details", "reasoning_tokens"), "number"),
             ScalarExtraction("usage_cost", ("usage", "cost"), "number"),
+            ScalarExtraction("finish_reason", ("choices", 0, "finish_reason"), "string"),
         ),
     ),
 }
@@ -241,7 +248,10 @@ def _extract_scalar(payload: dict, scalar: ScalarExtraction) -> tuple[int | floa
     """One allowlisted scalar from a parsed response object; (None, why) when absent."""
     node: object = payload
     for token in scalar.pointer:
-        if not isinstance(node, dict) or token not in node:
+        if isinstance(token, int):
+            if not isinstance(node, list) or not (0 <= token < len(node)):
+                return None, f"response carries no {scalar.path!r}"
+        elif not isinstance(node, dict) or token not in node:
             return None, f"response carries no {scalar.path!r}"
         node = node[token]
     if scalar.kind == "number":
@@ -572,11 +582,14 @@ def loop_digest(record_file: Path) -> dict:
     records = read_records(record_file, include_probe=True)
     lines = [r for r in records if "provider" in r or "usage_cost" in r]
     providers: dict[str, int] = {}
+    finish_reasons: dict[str, int] = {}
     usage = {"prompt_tokens": 0, "completion_tokens": 0, "reasoning_tokens": 0, "cost_usd": 0.0}
     unread = {"provider": 0, "cost": 0}
     for r in lines:
         served = r.get("provider") or "(absent)"
         providers[served] = providers.get(served, 0) + 1
+        reason = r.get("finish_reason") or "(absent)"
+        finish_reasons[reason] = finish_reasons.get(reason, 0) + 1
         if r.get("provider") is None:
             unread["provider"] += 1
         for key, field_name in (("usage_prompt_tokens", "prompt_tokens"),
@@ -591,5 +604,11 @@ def loop_digest(record_file: Path) -> dict:
         else:
             unread["cost"] += 1
     usage["cost_usd"] = round(usage["cost_usd"], 8)
+    ordered = sorted(lines, key=lambda r: r.get("seq") or 0)
+    completed = [r for r in ordered if r.get("finish_reason")]
     return {"requests": len(lines), "served_providers": providers, "usage": usage,
+            "finish_reasons": finish_reasons,
+            # The last completed response's finish reason (by seq): the scored turn's
+            # final one, since the scored turn is the invocation's last.
+            "finish_reason_final": completed[-1]["finish_reason"] if completed else None,
             "provider_unread": unread["provider"], "cost_unread": unread["cost"], "lines": lines}

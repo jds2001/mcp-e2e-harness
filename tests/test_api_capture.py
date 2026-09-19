@@ -218,10 +218,11 @@ def test_the_allowlist_is_confined_to_the_contract():
         ("usage_completion_tokens", "usage.completion_tokens", "number"),
         ("usage_reasoning_tokens", "usage.completion_tokens_details.reasoning_tokens", "number"),
         ("usage_cost", "usage.cost", "number"),
+        ("finish_reason", "choices[0].finish_reason", "string"),  # sixth entry, WO-3 (2026-09-18)
     ]
     every_key = {s.key for e in RESPONSE_SCALAR_ALLOWLIST.values() for s in e.scalars}
     assert every_key == {"count_tokens", "provider", "usage_prompt_tokens", "usage_completion_tokens",
-                         "usage_reasoning_tokens", "usage_cost"}
+                         "usage_reasoning_tokens", "usage_cost", "finish_reason"}
 
 
 @pytest.mark.parametrize("path", ["/v1/messages/count_tokens", "/v1/responses/input_tokens"])

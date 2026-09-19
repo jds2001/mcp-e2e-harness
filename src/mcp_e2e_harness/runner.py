@@ -20,6 +20,7 @@ the ancestor harness:
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import re
@@ -655,6 +656,9 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "trace_parse_errors": parse_errors,
         "tool_calls": [r.get("tool", "?") for r in records],
         "answer_chars": len(answer),
+        # A digest of answer.txt (sha256, first 16 hex): the per-cell distinct-answer
+        # count in run-manifest.json is computed from these (WO-3).
+        "answer_sha256_16": hashlib.sha256(answer.encode("utf-8", "replace")).hexdigest()[:16],
         "command": turn.argv,
         "cwd": str(cwd),
         "recorded_tool_surface": recorded_surface,
@@ -1415,8 +1419,16 @@ def run(config: RunConfig) -> RunResult:
     for cell_name in config.cells:
         cell = manifest.cells[cell_name]
         marks = config.drivers[cell["driver"]].cell_marks(cell)
+        # Distinct answers across the cell's invocations (WO-3): the determinism
+        # question is not loop-specific, so every cell carries it. A digest map, so a
+        # reader sees which rows repeat without opening answer files.
+        digests: dict[str, int] = {}
+        for meta in results:
+            if meta["cell"] == cell_name and meta.get("answer_sha256_16") is not None:
+                digests[meta["answer_sha256_16"]] = digests.get(meta["answer_sha256_16"], 0) + 1
+        marks["answers"] = {"invocations": sum(digests.values()), "distinct": len(digests), "digests": digests}
         if "scaffold" not in marks:
-            cell_marks[cell_name] = marks  # product family: the family mark alone
+            cell_marks[cell_name] = marks  # product family: the family mark plus answers
             continue
         served: dict[str, int] = {}
         family = config.drivers[cell["driver"]].family

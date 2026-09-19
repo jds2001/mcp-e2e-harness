@@ -79,6 +79,12 @@ def read_lines(path: Path) -> list[dict]:
 SUT_TOOLS = ["mcp__notes_sut__file_note", "mcp__notes_sut__list_unfiled_notes", "mcp__notes_sut__read_note"]
 
 
+def marks_answers_ok(run_dir: Path, cell: str, *, invocations: int, distinct: int) -> bool:
+    answers = json.loads((run_dir / "run-manifest.json").read_text())["cell_marks"][cell]["answers"]
+    return (answers["invocations"], answers["distinct"], sum(answers["digests"].values())) == (
+        invocations, distinct, invocations)
+
+
 # ------------------------------------------------------------- the scaffold
 
 def test_scaffold_is_hashed_instrument_content():
@@ -305,7 +311,12 @@ def test_pinned_cell_end_to_end(tmp_path, fake_openrouter):
                             "provider", "provider_note", "usage_prompt_tokens", "usage_prompt_tokens_note",
                             "usage_completion_tokens", "usage_completion_tokens_note",
                             "usage_reasoning_tokens", "usage_reasoning_tokens_note",
-                            "usage_cost", "usage_cost_note"}
+                            "usage_cost", "usage_cost_note", "finish_reason", "finish_reason_note"}
+    assert [r["finish_reason"] for r in wire] == ["tool_calls", "stop"]
+    assert all(r["finish_reason_note"] is None for r in wire)
+    assert loop["finish_reason"] == "stop" and loop["finish_reasons"] == {"tool_calls": 1, "stop": 1}
+    assert meta["answer_sha256_16"] and len(meta["answer_sha256_16"]) == 16
+    assert marks_answers_ok(config.run_dir, "loop-cell", invocations=1, distinct=1)
     surface = meta["api_surface"]
     assert surface["expected_wire_surface"] == SUT_TOOLS
     assert surface["wire_surface_mismatches"] == []
@@ -654,10 +665,11 @@ def test_product_rows_carry_the_family_mark(tmp_path, fake_drivers):
     assert "scaffold" not in meta and "reproducibility" not in meta
     assert meta["consumer_limit"] is None
     run_manifest = json.loads((config.run_dir / "run-manifest.json").read_text())
-    assert run_manifest["cell_marks"] == {"basic": {"driver_family": "product"}}
+    assert run_manifest["cell_marks"]["basic"]["driver_family"] == "product"
+    assert run_manifest["cell_marks"]["basic"]["answers"]["invocations"] == 1
     assert run_manifest["loop_cells"] == {}
     report = json.loads((config.run_dir / "checks-report.json").read_text())
-    assert report["cells"]["basic"] == {"driver": "fake", "driver_family": "product"}
+    assert report["cells"]["basic"]["driver_family"] == "product" and report["cells"]["basic"]["driver"] == "fake"
 
 
 def test_retryable_status_is_retried_and_visible_on_the_wire(tmp_path, fake_openrouter):
@@ -796,3 +808,66 @@ def test_upstream_error_metadata_is_surfaced(tmp_path, fake_openrouter):
                          "metadata": {"raw": "temporarily rate-limited upstream", "provider_name": "Mistral"}}}
     with pytest.raises(LoopError, match="Mistral.*rate-limited upstream"):
         client._raise_for_error(429, payload, {"provider": {}})
+
+
+# ------------------------------------------------------------- WO-3
+
+def test_finish_reason_length_is_recorded_on_the_wire_and_in_meta(tmp_path, fake_openrouter):
+    # A cap cut ("length") is distinguishable from a self cut ("stop") by the recorded
+    # reason, never by token-count inference (the E17 need).
+    fake = fake_openrouter
+    fake.answer_finish_reason = "length"
+    config = loop_config(tmp_path, loop_manifest())
+    result = run(config)
+    assert result.failures == 0
+    meta = result.results[0]
+    wire = read_lines(config.run_dir / "loop-cell" / "A" / "A1" / "api-surface.jsonl")
+    assert [r["finish_reason"] for r in wire] == ["tool_calls", "length"]
+    assert meta["loop"]["finish_reason"] == "length"
+    assert meta["loop"]["finish_reasons"] == {"tool_calls": 1, "length": 1}
+    probe_line = read_lines(config.run_dir / "loop-cell" / "loop-probe" / "api-surface.jsonl")[0]
+    assert probe_line["finish_reason"] == "tool_calls"
+
+
+def test_finish_reason_absent_is_null_with_a_note(tmp_path, fake_openrouter):
+    fake = fake_openrouter
+    fake.status_sequence = [200, 503]  # one error line among the scored requests
+    config = loop_config(tmp_path, loop_manifest())
+    result = run(config)
+    assert result.failures == 0
+    wire = read_lines(config.run_dir / "loop-cell" / "A" / "A1" / "api-surface.jsonl")
+    assert wire[0]["finish_reason"] is None and "HTTP 503" in wire[0]["finish_reason_note"]
+    assert result.results[0]["loop"]["finish_reasons"] == {"(absent)": 1, "tool_calls": 1, "stop": 1}
+    assert result.results[0]["loop"]["finish_reason"] == "stop"
+
+
+def test_distinct_answer_count_per_cell(tmp_path, fake_openrouter):
+    fake = fake_openrouter
+    fake.echo_prompt_in_answer = True
+    data = loop_manifest()
+    data["prompts"] += [dict(data["prompts"][0], id="A2", prompt="A different question."),
+                        dict(data["prompts"][0], id="A3")]  # same text as A1 -> same answer
+    config = loop_config(tmp_path, data)
+    result = run(config)
+    assert result.failures == 0
+    run_manifest = json.loads((config.run_dir / "run-manifest.json").read_text())
+    answers = run_manifest["cell_marks"]["loop-cell"]["answers"]
+    assert answers["invocations"] == 3 and answers["distinct"] == 2
+    assert sorted(answers["digests"].values()) == [1, 2]
+    assert run_manifest["loop_cells"]["loop-cell"]["answers"] == answers
+    digests = {m["prompt_id"]: m["answer_sha256_16"] for m in result.results}
+    assert digests["A1"] == digests["A3"] != digests["A2"]
+    assert set(answers["digests"]) == {digests["A1"], digests["A2"]}
+
+
+def test_product_cells_carry_the_distinct_answer_count(tmp_path, fake_drivers):
+    from mcp_e2e_harness.runner import RunConfig as RC
+
+    data = manifest_data()
+    data["prompts"].append(dict(data["prompts"][0], id="A2"))
+    manifest = load_manifest(write_manifest(tmp_path, data))
+    config = RC(manifest=manifest, run_dir=tmp_path / "run", cells=["basic"], drivers=fake_drivers,
+                timeout_s=120, log=lambda line: None)
+    run(config)
+    answers = json.loads((config.run_dir / "run-manifest.json").read_text())["cell_marks"]["basic"]["answers"]
+    assert answers["invocations"] == 2 and answers["distinct"] == 1

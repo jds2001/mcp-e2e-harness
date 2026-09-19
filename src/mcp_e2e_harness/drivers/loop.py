@@ -556,6 +556,11 @@ class LoopDriver(Driver):
             "provider_verified": (verified_names[0] if len(verified_names) == 1 else
                                   (verified_names or None)) if pin and not mismatches else None,
             "served_providers": digest["served_providers"],
+            # WO-3: finish reasons off the wire -- the scored turn's final one (a
+            # scorer separates "length" cap cuts from "stop" self cuts here) and the
+            # counts over every completed response of the invocation.
+            "finish_reason": digest["finish_reason_final"],
+            "finish_reasons": digest["finish_reasons"],
             "provider_mismatches": mismatches,
             "provider_unread": digest["provider_unread"],
             "usage": digest["usage"],
