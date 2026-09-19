@@ -10,6 +10,10 @@
 4. **Reference vectors as tests.** Copy the `answer.txt` and the reference string of each row in the `40-instruments.md` vector table into `tests/fixtures/answer-coverage/` (the public-law text is public domain; the answers are model output from our own runs) and assert every value in the table exactly, including the floor-40 rows and the zero-span row. If any vector does not reproduce, do not adjust the vector: report the discrepancy with the spans you found.
 5. **Tests** for the declaration validation, the non-string pointer path, and the selector reuse; `ruff` clean; nothing under `documentation/`. Live spend: $0.
 
+## Addendum (2026-09-18, after WO-3 acceptance)
+
+6. **Key the distinct-answer count by prompt.** WO-3's `answers` block aggregates across a cell's prompts, so its duplicate can be two prompts whose answers matched. Requirement 11 concerns repeats of one prompt: record `answers` per prompt id within the cell (`answers: {"C1": {invocations, distinct, digests}, …}`), and keep a cell-level total only if it is clearly labeled as across prompts. The per-row `answer_sha256_16` stays as is. One test with two invocations of one prompt and one of another.
+
 ## Acceptance
 
 The reported method hash; one real `measurements` entry from a fake-upstream run; the vector test's name and its pass; any discrepancy stated as such.
