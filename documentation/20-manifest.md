@@ -63,7 +63,7 @@ The concrete consumer that the 2026-09-11 deferral waited for is the maintainer'
 | `scaffold` | yes | the harness loop scaffold, `name@version`, pinned by content hash in `40-instruments.md`; joins cell identity like a crowding procedure does |
 | `knobs` | yes | the deployment's request fields verbatim — for OpenRouter the unified `reasoning` object (`{"effort": "low"}`), `temperature`, `max_tokens`, and so on. Never translated to another vendor's scale (`10-harness.md`). A floor-role reasoning model carries its **minimum** effort here, since most cannot switch reasoning off; whether the knob is honored is Q8 P-knob-drop territory until measured |
 | `data_policy` | no | `deny` (default) or `allow`; `allow` is the recorded opt-out of requirement 7's provider preference |
-| `budget_usd` | no | a per-cell spend cap; the run-level cap is harness configuration (requirement 6). Either cap stopping the run is a surfaced run-level outcome |
+| `budget_usd` | no | a per-cell spend cap: reaching it stops **that cell** (remaining prompts skipped, completed rows stand) and continues the run; the run-level cap, harness configuration, stops the run. Either stop is recorded as a run-level outcome with its scope (ruled 2026-09-18 on WO-1 finding 6: a cell cap that halted the whole grid would be unusable) |
 
 `tool_surface` for a loop cell is constructed by the harness from the server's advertised tools, so `"full"` and a list have exactly the S7 meaning: the wire tools array must equal the surface on every scored request.
 

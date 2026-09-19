@@ -9,6 +9,18 @@ The registry of harness-owned instrument content the spec has pinned. A crowded 
 | `neutral-file-triage@2` | `3197f43ed3cc8b794ef97bb62945f63cb6a5287e12859cbcf65e946dde52ac3e` | 2026-08-31 | **pinned** |
 | `neutral-file-triage@1` | `d7cf153febdc9497dab62109dd666158162e11fc4596b69dfa57457e0fd400d2` | 2026-08-30 | superseded — S6 defect, see below |
 
+## Loop scaffolds
+
+| scaffold | content hash (SHA-256) | pinned | status |
+|---|---|---|---|
+| `loop-scaffold@1` | `b92ad9f83c8f23bee833fd1cb4c746ff23c3b0cb9a2b4637edb1b8c2ce17e2f6` | 2026-09-18 | **pinned** |
+
+## `loop-scaffold@1` — pin record (2026-09-18, spec session)
+
+**Hash measured** by executing `LOOP_SCAFFOLD_V1.content_hash()`; the value matches the implementation's report (WO-1 §1) and the `scaffold.content_hash` recorded in every loop cell's `meta.json`, every `cell_gates` tuple, and every probe-cache entry across the 2026-09-18 runs (`runs/2026-09-18-q8-*`, `runs/2026-09-18-loop-smoke`). Identity pin, same caveat as the crowding pins: obtained by running the instrument, so it detects drift rather than certifying what the code hashes over; the report states the hash covers name, version, system prompt, step cap, tool-loop policy text, probe tool definition, and probe prompt.
+
+**Content review against requirement 1 and no-disclosure (`50-drivers.md` → loop; `10-harness.md`).** System prompt, verbatim from the report: "You are a helpful assistant with access to tools. When a tool can supply information you need, call it instead of relying on memory. Base your answer on what the tools return, cite or quote retrieved material where that matters, and say plainly when something could not be determined with the tools available." Verdict: generic, domain-neutral, no mention of testing, harnesses, or evaluation; it does instruct tool-first behavior and honest non-determination, which is a scaffold choice the suite's Layer-2 criteria must be read against (a consumer told to say plainly what could not be determined is being nudged toward the floor behaviors the criteria score — the loop measures server × model *under this nudge*, and that is what S11 means by "under a pinned harness scaffold"). Step cap 24 requests per turn, fresh per pre-turn and scored turn. Tool-loop policy: one request per step, tool results appended as text joined by newlines (JSON serialization when no text), no `tool_choice` sent, turn ends on a call-free response or at the cap. Probe tool `get_probe_value(key)`, probe prompt asks for key `alpha`. Not in the hash but sent on every request: `usage.include` and the strict-routing provider block; tools offered under the `mcp__<server>__<tool>` idiom so wire surfaces compare across drivers. Recorded as adequate for v1. Two things a v2 would want, noted so they are not forgotten: the join-with-newlines flattening discards MCP result structure (image or resource items never reach the model), and the cap applies per turn rather than per conversation.
+
 ## `neutral-file-triage@2` — pin record (2026-08-31, spec session)
 
 **Hash measured** by executing `NEUTRAL_FILE_TRIAGE_V2.content_hash()`; the value matches both the implementation's report and the `crowding.content_hash` recorded in the live run's meta (`runs/2026-08-31-driver-proof/smoke-crowded/S/S1/meta.json`) — the pin, the code, and a real run agree. Same identity-pin caveat as v1: obtained by running the instrument, so it detects drift rather than certifying what the code hashes over.
