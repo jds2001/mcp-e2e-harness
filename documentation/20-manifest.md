@@ -14,6 +14,7 @@ Conventions: keys beginning with `_` are commentary — the harness ignores thei
 | `rubrics` | no | named scoring rubrics for prompts with null `pass`/`fail` |
 | `cells` | yes | the cell grid — see below |
 | `checks` | no | declarative Layer-1 rules, schema in `30-checks.md` |
+| `measurements` | no | row measurements — mechanical per-row values recorded beside the row, never outcomes; schema in `30-checks.md` → "Row measurements" (added 2026-09-18 for uscde-mcp's C1 v2 contents clause) |
 | `prompts` | yes | the prompt list — see below |
 
 ## `server` — MCP registration

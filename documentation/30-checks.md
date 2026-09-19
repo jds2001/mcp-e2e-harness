@@ -49,3 +49,35 @@ Per run, per check, the harness reports exactly one of four outcomes. The distin
 A missing pointer during assertion (as opposed to selection) is a **fail** of `present`-style assertions and an **error** for assertions that need a value to test (`matches` on a missing pointer is a fail of the implied presence, reported as fail with the missing pointer named — not an error, because "the field is absent" is exactly what such a check exists to catch).
 
 Scope is per-record only in this version. Cross-record assertions (the ancestor's "no upstream failure presented in a zero-hit shape *anywhere*" was still per-record; a genuinely cross-record contract has not yet appeared) are an open question — see `90-open-questions.md` Q1 — and will be added as a language change if a real suite produces one, not preemptively.
+
+## Row measurements — recorded, never outcomes (ruling S14, 2026-09-18)
+
+A third artifact class beside checks and scoring: **mechanical measurements across two artifacts of one row** (a trace record and the row's answer), computed by the harness, recorded beside the row, and never reported as pass, fail, vacuous, or error. A measurement is a number with a pinned method; what the number means is the scorer's reading. Suites declare them under the manifest's top-level `measurements` list, reusing the selector and pointer vocabulary above. This is not Q1: a row measurement is per row and asserts nothing, so it is no precedent for extending the assertion language to cross-record scope.
+
+Declaration shape:
+
+```json
+{"name": "answer_coverage", "measure": "answer-coverage@1",
+ "applies_to": {"tool": ["get_public_law", "get_us_code_section"]},
+ "reference": "/response/structuredContent/text/content",
+ "floor": 64}
+```
+
+- `name`: the key the row's `meta.json` records it under (`measurements.<name>`, one entry per matched record, carrying the record `index` and `tool`).
+- `measure`: a harness-owned, versioned method pinned in `40-instruments.md`; the row records the method name and its content hash beside the values, so a number is never read without the method that produced it.
+- `applies_to`: the checks selector (`tool`, optional `when`); the measurement is computed for every matched record.
+- `reference`: an RFC 6901 pointer relative to the record, resolving to the **string** the answer is measured against. It is the suite's job to point at the payload proper — for a server whose result carries a banner or a message beside the content, point at the content field, so the suite subtracts its own banner by construction. A pointer that resolves to a non-string, or does not resolve, records a null measurement with a note; it is not an outcome of any kind. Never measure against the whole serialized record: its JSON escaping differs from what a model emits.
+- Method parameters (`floor` here) are recorded with the values.
+
+### `answer-coverage@1` — how much of a reference string the answer reproduces
+
+Purpose, and its limit stated first: the measure records **what the answer reproduces verbatim** from a tool result — the mechanical half of a "misstates its own contents" clause. It cannot read the answer's claim, and it cannot tell paraphrase from omission; a summary answer scores near zero and that is correct. Scorers read it on prompts whose expected answer quotes, and ignore it where the expected answer is a summary. Read beside the row's `finish_reason` (`10-harness.md`, recording contract): a third of the window with a model stop is a model cut; the whole window with a length stop is a knob cut; the number alone is ambiguous between them.
+
+Method, normative — the implementation embeds this numbered text verbatim and reports its content hash:
+
+1. **Inputs:** `answer` = the row's `answer.txt`, whole; `reference` = the string the declaration's pointer resolves to; `floor` = the declared minimum span length in normalized characters (method default 64).
+2. **Normalization,** applied identically to both: every maximal run of Unicode whitespace becomes one ASCII space, and leading and trailing whitespace is removed. Nothing else is altered — case, punctuation, and quoting are compared as is. An offset map from each normalized character to the raw index of the character it came from is kept for the reference.
+3. **Matching:** find the longest common substring of the two normalized strings, ties broken by the earliest start in the answer, then the earliest start in the reference, with no junk heuristics. If its length is below `floor`, stop this branch. Otherwise record it as a span and recurse on the two remaining pairs of segments: everything before the span in both strings, and everything after it in both. Spans are therefore non-crossing: reproduced material that the answer reordered is counted at most once and only in the order the reference has it.
+4. **Outputs, per record:** `reference_chars_raw`, `reference_chars_normalized`, `answer_chars_raw`, `floor`, `spans` (count), `matched_chars` (sum of span lengths, normalized units), `furthest_offset` (the raw reference index one past the last character of the span that reaches furthest into the reference — reference coordinates, so a suite whose pointer already excludes its banner needs no arithmetic; 0 when there are no spans), and `share` = `matched_chars` ÷ `reference_chars_normalized`, rounded to four places; null when the reference is empty.
+
+Reference vectors that a conforming implementation reproduces exactly are in the method's pin record (`40-instruments.md`), computed by the spec session on real rows.

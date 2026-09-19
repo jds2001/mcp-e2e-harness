@@ -9,6 +9,26 @@ The registry of harness-owned instrument content the spec has pinned. A crowded 
 | `neutral-file-triage@2` | `3197f43ed3cc8b794ef97bb62945f63cb6a5287e12859cbcf65e946dde52ac3e` | 2026-08-31 | **pinned** |
 | `neutral-file-triage@1` | `d7cf153febdc9497dab62109dd666158162e11fc4596b69dfa57457e0fd400d2` | 2026-08-30 | superseded — S6 defect, see below |
 
+## Row-measurement methods
+
+| method | content hash (SHA-256, over the normative method text as embedded) | pinned | status |
+|---|---|---|---|
+| `answer-coverage@1` | pending the implementation's report (WO-4) | — | **specified 2026-09-18**; pins on the reported hash once the reference vectors reproduce |
+
+## `answer-coverage@1` — reference vectors (2026-09-18, spec session)
+
+Computed by the spec session from real rows with a reference implementation of the method in `30-checks.md` (whitespace normalization, longest-common-substring recursion with earliest-in-answer tie-break, floor as stated). The reference is the `get_public_law` record's `/response/structuredContent/text/content` string in each row. A conforming implementation reproduces every value exactly; a mismatch is a method-conformance defect, not a rounding note. The rows are gitignored run artifacts; WO-4 copies each row's `answer.txt` and reference string into test fixtures so the vectors survive the run directory.
+
+| row | floor | reference raw / normalized | answer raw | spans | matched | furthest_offset | share | reading |
+|---|---|---|---|---|---|---|---|---|
+| `runs/2026-09-18-q8-provider-pin/pinned-r09/loop-isolation-pinned/C/C1`, record 0 | 64 | 20,081 / 17,748 | 7,429 | 2 | 5,997 | 6,767 | 0.3379 | the self-cut paste that claimed the whole window — the row two hand computations disagreed on (6,769/6,764 and 6,765/6,717); this is the pinned number |
+| same row | 40 | 20,081 / 17,748 | 7,429 | 2 | 5,997 | 6,767 | 0.3379 | floor-insensitive here |
+| `runs/2026-09-18-q8-floor-crowded/loop-floor-pinned/C/C1`, record 0 | 64 | 20,081 / 17,748 | 7,093 | 3 | 5,858 | 6,767 | 0.3301 | same cut point as r09 (deterministic self-truncation), paste reformatted so three spans |
+| `runs/2026-09-18-q8-provider-pin/pinned-r01/loop-isolation-pinned/C/C1`, record 0 | 64 | 20,081 / 17,748 | 20,229 | 19 | 17,463 | 19,958 | 0.9839 | the cap-cut paste: nearly the whole window, ended by `max_tokens` — read with `finish_reason` |
+| `runs/2026-09-18-q8-provider-pin/unpinned-r01/loop-isolation-unpinned/C/C1`, record 0 | 64 | 20,081 / 17,748 | 2,505 | 3 | 241 | 1,048 | 0.0136 | a short answer that offered the PDF link and quoted a little |
+| same row | 40 | 20,081 / 17,748 | 2,505 | 4 | 296 | 1,048 | 0.0167 | floor 40 admits one more short span — why the default is 64 |
+| `uscode-mcp/documentation/runs/2026-09-16T003754Z/isolation/C/C1` (claude-code), record 0 | 64 | 100,082 / 88,873 | 1,251 | 0 | 0 | 0 | 0.0 | a summary answer: zero, correctly; at floor 40 a 55-character heading matches (1 span, 55) — the case the floor exists for |
+
 ## Loop scaffolds
 
 | scaffold | content hash (SHA-256) | pinned | status |
