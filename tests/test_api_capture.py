@@ -18,7 +18,10 @@ from mcp_e2e_harness.api_capture import RESPONSE_SCALAR_ALLOWLIST, ApiSurfaceRec
 # The complete per-request key set (10-harness.md, recording contract). A key outside
 # this set landing in a record is a contract breach, so tests pin it exactly.
 REQUEST_RECORD_KEYS = {"seq", "at", "path", "model", "tool_names", "tool_source", "body_keys",
-                       "body_bytes", "body_bytes_basis", "content_encoding"}
+                       "body_bytes", "body_bytes_basis", "content_encoding",
+                       # timing (10-harness.md, 2026-09-18): arrival-to-end-of-response; not an
+                       # allowlist entry, since it is a property of the exchange, not the body
+                       "duration_ms", "duration_note"}
 COUNT_TOKENS_KEYS = REQUEST_RECORD_KEYS | {"count_tokens", "count_tokens_note"}
 
 
@@ -332,6 +335,31 @@ def test_count_tokens_on_a_dead_upstream_is_null_never_missing(tmp_path):
     assert record["count_tokens"] is None
     assert record["count_tokens_note"] == "upstream unreachable"
     assert recorder.forward_errors == 1
+
+
+def test_duration_ms_is_arrival_to_end_of_response(tmp_path, fake_api_upstream):
+    recorder = ApiSurfaceRecorder(tmp_path / "cap.jsonl", fake_api_upstream)
+    base = recorder.start()
+    try:
+        post(base, "/v1/messages", {"model": "m-1", "tools": [], "messages": []})
+    finally:
+        recorder.stop()
+    (record,) = records(tmp_path)
+    assert isinstance(record["duration_ms"], float) and 0 <= record["duration_ms"] < 30_000
+    assert record["duration_note"] is None
+
+
+def test_duration_is_null_with_a_note_when_the_response_never_completed(tmp_path):
+    recorder = ApiSurfaceRecorder(tmp_path / "cap.jsonl", "http://127.0.0.1:9")
+    base = recorder.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError):
+            post(base, "/v1/messages", {"model": "m", "tools": [], "messages": []})
+    finally:
+        recorder.stop()
+    (record,) = records(tmp_path)
+    assert record["duration_ms"] is None
+    assert record["duration_note"] == "upstream unreachable"
 
 
 def test_dead_upstream_becomes_502_and_is_counted(tmp_path):

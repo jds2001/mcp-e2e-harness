@@ -223,19 +223,38 @@ class Catalog:
 EST_INPUT_BYTES = {"crowded": 586_489, "fresh": 128_544}
 EST_BYTES_PER_TOKEN = 105_242 / 37_193
 EST_OUTPUT_TOKENS = 5_000
+# Loop-specific basis (50-drivers.md -> loop, "Loop-specific cost basis", 2026-09-18,
+# harness recorder, uscde-mcp C1 at openai/gpt-oss-120b @ deepinfra/bf16, reasoning
+# low): the claude-code basis above overestimates loop spend by an order of magnitude
+# because the loop scaffold carries no product system prompt. Prompt tokens per
+# invocation, summed over its requests.
+EST_LOOP_PROMPT_TOKENS = {"crowded": 46_577, "fresh": 9_900}
+BASIS_PRODUCT = "product-driver byte basis (claude-code C1 request sizes, 2026-09-18)"
+BASIS_LOOP = "loop-measured basis (loop C1 prompt tokens under the harness recorder, 2026-09-18)"
 
 
-def estimate_invocation_usd(context: str, pricing: dict[str, float] | None) -> dict:
-    """A labeled estimate for one invocation; ``usd`` is None when the price is unknown."""
-    input_tokens = round(EST_INPUT_BYTES.get(context, EST_INPUT_BYTES["fresh"]) / EST_BYTES_PER_TOKEN)
+def estimate_invocation_usd(context: str, pricing: dict[str, float] | None, *, basis: str = "loop") -> dict:
+    """A labeled estimate for one invocation; ``usd`` is None when the price is unknown.
+
+    ``basis`` is ``"loop"`` (the measured loop prompt-token basis) or ``"product"``
+    (the byte-based product-driver basis); the record names which was used.
+    """
+    if basis == "loop":
+        input_tokens = EST_LOOP_PROMPT_TOKENS.get(context, EST_LOOP_PROMPT_TOKENS["fresh"])
+        basis_text = (f"{BASIS_LOOP}: measured prompt tokens per {context} invocation; output at "
+                      "minimum reasoning effort. Reasoning tokens are the unbounded term and are NOT "
+                      "bounded by this estimate.")
+    else:
+        input_tokens = round(EST_INPUT_BYTES.get(context, EST_INPUT_BYTES["fresh"]) / EST_BYTES_PER_TOKEN)
+        basis_text = (f"{BASIS_PRODUCT}: byte-based token estimate at {EST_BYTES_PER_TOKEN:.2f} bytes/token "
+                      "(+/-30% across tokenizers); output at minimum reasoning effort. Reasoning tokens "
+                      "are the unbounded term and are NOT bounded by this estimate.")
     record = {
         "context": context,
+        "basis_name": BASIS_LOOP if basis == "loop" else BASIS_PRODUCT,
         "estimated_input_tokens": input_tokens,
         "estimated_output_tokens": EST_OUTPUT_TOKENS,
-        "basis": ("byte-based token estimate from measured C1 request sizes at "
-                  f"{EST_BYTES_PER_TOKEN:.2f} bytes/token (+/-30% across tokenizers); output at "
-                  "minimum reasoning effort. Reasoning tokens are the unbounded term and are NOT "
-                  "bounded by this estimate."),
+        "basis": basis_text,
         "usd": None,
     }
     if pricing:

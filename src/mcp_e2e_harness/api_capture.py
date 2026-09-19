@@ -15,7 +15,12 @@ contract", added 2026-09-02 for measurements such as uscde-mcp's E15) -- ``body_
 with ``body_bytes_basis`` (``"decompressed"`` when the body parsed, after undoing a
 gzip/deflate content-encoding if present; ``"wire"`` when it did not, in which case
 the size is the raw wire bytes) and ``content_encoding`` (the request's declared
-encoding, null for identity; the one header value the contract names). Never any
+encoding, null for identity; the one header value the contract names), and -- timing
+(spec 10-harness.md, added 2026-09-18 from WO-1 finding 5) -- ``duration_ms`` from
+request arrival (``at``) to the end of the response, null with ``duration_note`` when
+the response never completed. Timing is a property of the exchange, not a
+response-body extraction, so it is not an allowlist entry. Every line is therefore
+written when its response ends (``seq`` is still assigned at arrival). Never any
 other header (credentials ride there), never message content, never tool schemas.
 Body-less requests (GETs) are forwarded and not recorded.
 
@@ -47,6 +52,7 @@ from __future__ import annotations
 import gzip
 import json
 import threading
+import time
 import zlib
 from dataclasses import dataclass
 
@@ -335,10 +341,9 @@ class ApiSurfaceRecorder:
         named, and counted in ``unrecorded_requests``/``unrecorded_encodings`` so the
         runner can say the surface went unread for it.
 
-        Returns the record when its endpoint is on the response allowlist -- the
-        line is then written by the caller once the response has been seen -- and
-        None after writing it immediately otherwise. ``seq`` is assigned here, at
-        request arrival, either way.
+        Returns the record; the caller writes it once the response has ended (for
+        ``duration_ms``, and for the allowlisted scalars where the endpoint has any).
+        ``seq`` is assigned here, at request arrival.
         """
         payload, decoded = _parse_json_object(body, content_encoding)
         with self._lock:
@@ -362,10 +367,8 @@ class ApiSurfaceRecorder:
         if payload is not None:
             record["tool_names"], record["tool_source"] = _extract_tool_names(payload)
         record.update(self.mark)
-        if _allowlist_entry(path) is not None:
-            return record
-        self._write(record)
-        return None
+        record["_t0"] = time.monotonic()
+        return record
 
     def _write(self, record: dict) -> None:
         with self._lock, open(self.record_file, "a", encoding="utf-8") as handle:
@@ -393,7 +396,7 @@ class ApiSurfaceRecorder:
 
     def _proxy(self, handler: BaseHTTPRequestHandler) -> None:
         body = self._read_body(handler)
-        pending: dict | None = None  # an allowlisted request's record, awaiting its scalar
+        pending: dict | None = None  # the request's record, written when its response ends
         if body:
             pending = self._record(handler.path, body, handler.headers.get("Content-Encoding"))
         entry = _allowlist_entry(handler.path) or ""
@@ -417,12 +420,14 @@ class ApiSurfaceRecorder:
             handler.end_headers()
             handler.wfile.write(message)
             if pending is not None:
-                self._finish_allowlisted(pending, entry, None, None, None, "upstream unreachable")
+                self._finish(pending, entry, None, None, None, "upstream unreachable",
+                             completed=False, incomplete_note="upstream unreachable")
             return
         # Only an allowlisted endpoint's response is buffered -- every other response
         # streams through untouched and unread.
-        buffered: bytearray | None = bytearray() if pending is not None else None
+        buffered: bytearray | None = bytearray() if (pending is not None and entry) else None
         overflow = False
+        completed = False
         try:
             handler.send_response(resp.status)
             for key, value in resp.getheaders():
@@ -442,40 +447,50 @@ class ApiSurfaceRecorder:
                 handler.wfile.write(f"{len(chunk):X}\r\n".encode() + chunk + b"\r\n")
                 handler.wfile.flush()
             handler.wfile.write(b"0\r\n\r\n")
+            completed = True
         except OSError:
             pass  # driver hung up mid-stream; nothing to salvage
         finally:
             conn.close()
             if pending is not None:
-                self._finish_allowlisted(
+                self._finish(
                     pending, entry, resp.status, bytes(buffered or b""),
                     resp.getheader("Content-Encoding"),
-                    f"response exceeded {_ALLOWLISTED_RESPONSE_CAP} bytes" if overflow else None)
+                    f"response exceeded {_ALLOWLISTED_RESPONSE_CAP} bytes" if overflow else None,
+                    completed=completed,
+                    incomplete_note=None if completed else "response did not complete (client closed the stream)")
 
-    def _finish_allowlisted(self, record: dict, entry: str, status: int | None,
-                            response_body: bytes | None, content_encoding: str | None,
-                            note: str | None) -> None:
-        """Attach the endpoint's allowlisted scalars (or why each is absent) and write
-        the held line.
+    def _finish(self, record: dict, entry: str, status: int | None,
+                response_body: bytes | None, content_encoding: str | None,
+                note: str | None, *, completed: bool, incomplete_note: str | None) -> None:
+        """Attach timing and, for an allowlisted endpoint, its scalars (or why each is
+        absent); then write the held line.
 
-        Each scalar lands under its record key (``count_tokens``; ``provider``,
+        ``duration_ms`` runs from request arrival to the end of the response; when the
+        response never completed it is null and ``duration_note`` says why. Each
+        allowlisted scalar lands under its record key (``count_tokens``; ``provider``,
         ``usage_prompt_tokens``, ...), with ``<key>_note`` null on success and naming
         the reason otherwise -- a call the driver made is always visible as such,
         even when the value could not be read.
         """
-        payload: dict | None = None
-        if note is None:
-            if status is not None and status >= 400:
-                note = f"upstream answered HTTP {status}"
-            else:
-                payload, _decoded = _parse_json_object(response_body or b"", content_encoding)
-                if payload is None:
-                    note = ("response body not parseable as a JSON object "
-                            f"(encoding: {content_encoding or 'identity'})")
-        for scalar in RESPONSE_SCALAR_ALLOWLIST[entry].scalars:
-            value, why = (None, note) if payload is None else _extract_scalar(payload, scalar)
-            record[scalar.key] = value
-            record[f"{scalar.key}_note"] = why
+        t0 = record.pop("_t0", None)
+        elapsed = round((time.monotonic() - t0) * 1000, 3) if t0 is not None else None
+        record["duration_ms"] = elapsed if completed else None
+        record["duration_note"] = None if completed else (incomplete_note or "response did not complete")
+        if entry:
+            payload: dict | None = None
+            if note is None:
+                if status is not None and status >= 400:
+                    note = f"upstream answered HTTP {status}"
+                else:
+                    payload, _decoded = _parse_json_object(response_body or b"", content_encoding)
+                    if payload is None:
+                        note = ("response body not parseable as a JSON object "
+                                f"(encoding: {content_encoding or 'identity'})")
+            for scalar in RESPONSE_SCALAR_ALLOWLIST[entry].scalars:
+                value, why = (None, note) if payload is None else _extract_scalar(payload, scalar)
+                record[scalar.key] = value
+                record[f"{scalar.key}_note"] = why
         self._write(record)
 
 

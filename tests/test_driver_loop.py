@@ -135,10 +135,18 @@ def test_pin_parsing_and_served_provider_matching():
 
 
 def test_cost_estimate_is_labeled_and_names_the_unbounded_term():
-    est = estimate_invocation_usd("crowded", {"prompt": 0.15e-6, "completion": 0.6e-6})
-    assert est["estimated_input_tokens"] > est["estimated_output_tokens"]
-    assert 0.02 < est["usd"] < 0.05
-    assert "unbounded" in est["basis"] and "estimate" in est["basis"]
+    pricing = {"prompt": 0.15e-6, "completion": 0.6e-6}
+    product = estimate_invocation_usd("crowded", pricing, basis="product")
+    assert product["estimated_input_tokens"] > product["estimated_output_tokens"]
+    assert 0.02 < product["usd"] < 0.05
+    assert "unbounded" in product["basis"] and "byte" in product["basis"]
+    # WO-2 item 4: loop cells use the loop-measured basis (50-drivers.md, 2026-09-18),
+    # an order of magnitude below the product byte basis, and say which was used.
+    loop = estimate_invocation_usd("crowded", pricing)
+    assert loop["estimated_input_tokens"] == 46_577 and loop["basis_name"].startswith("loop-measured")
+    assert loop["usd"] < product["usd"] / 3
+    assert estimate_invocation_usd("fresh", pricing)["estimated_input_tokens"] == 9_900
+    assert "unbounded" in loop["basis"]
     assert estimate_invocation_usd("fresh", None)["usd"] is None
 
 
@@ -264,7 +272,13 @@ def test_pinned_cell_end_to_end(tmp_path, fake_openrouter):
     assert meta["scaffold"] == {"name": "loop-scaffold@1", "content_hash": LOOP_SCAFFOLD_V1.content_hash()}
     assert meta["provider_pin"] == PIN and meta["reproducibility"] == "pinned"
     assert meta["cell_id"].endswith(f"/scaffold:loop-scaffold@1/pin:{PIN}")
+    assert meta["consumer_limit"] is None
     loop = meta["loop"]
+    # WO-2 item 6: the verified part of the pin is distinguishable from the asserted part.
+    assert meta["quantization_asserted"] == "bf16"
+    assert loop["pin_slug_verified_against"] == "fakeprov" and loop["quantization_asserted"] == "bf16"
+    assert loop["provider_verified"] == PROVIDER
+    assert "quantization asserted" in loop["pin_verification"]
     assert loop["served_providers"] == {PROVIDER: 2}
     assert loop["provider_mismatches"] == [] and loop["provider_unread"] == 0
     assert loop["steps"] == 2 and loop["tool_calls"] == 1 and loop["step_cap_hit"] is False
@@ -285,8 +299,9 @@ def test_pinned_cell_end_to_end(tmp_path, fake_openrouter):
         assert "probe" not in r
         assert "provider" in r["body_keys"] and "usage" in r["body_keys"]
         assert r["tool_names"] == SUT_TOOLS or sorted(r["tool_names"]) == SUT_TOOLS
+    assert all(isinstance(r["duration_ms"], float) and r["duration_note"] is None for r in wire)
     assert set(wire[0]) == {"seq", "at", "path", "model", "tool_names", "tool_source", "body_keys",
-                            "body_bytes", "body_bytes_basis", "content_encoding",
+                            "body_bytes", "body_bytes_basis", "content_encoding", "duration_ms", "duration_note",
                             "provider", "provider_note", "usage_prompt_tokens", "usage_prompt_tokens_note",
                             "usage_completion_tokens", "usage_completion_tokens_note",
                             "usage_reasoning_tokens", "usage_reasoning_tokens_note",
@@ -334,8 +349,12 @@ def test_pinned_cell_end_to_end(tmp_path, fake_openrouter):
     assert run_manifest["cell_gates"]["loop-cell"]["verdict"] == "pass"
     assert run_manifest["budget"]["spent_usd"] == pytest.approx(0.003)
     assert run_manifest["budget"]["stops"] == [] and run_manifest["budget"]["run_stopped_by_budget"] is False
+    assert marks["provider_verified"] == [PROVIDER] and marks["quantization_asserted"] == "bf16"
     pre = run_manifest["pre_run"]["loop"]
     assert pre["cells"]["loop-cell"]["estimate"]["usd_total"] > 0
+    assert pre["estimate_basis"].startswith("loop-measured")
+    assert pre["cells"]["loop-cell"]["estimate"]["basis_name"] == pre["estimate_basis"]
+    assert "loop-measured basis" in "\n".join(lines_logged)
     assert pre["cells"]["loop-cell"]["pinned_endpoint"]["advertises_tools"] is True
     assert pre["cells"]["loop-cell"]["provider_disclosure"]["privacy_policy_url"] == "https://fake.test/privacy"
     assert "not a verified privacy property" in pre["cells"]["loop-cell"]["provider_disclosure"]["honesty_limit"]
@@ -553,7 +572,8 @@ def test_crowded_cell_runs_the_preturn_first_in_the_same_conversation(tmp_path, 
     assert meta["tool_calls"] == ["list_unfiled_notes"]
 
 
-def test_step_cap_bounds_a_runaway_loop(tmp_path, fake_openrouter):
+def test_step_cap_is_a_consumer_limit_not_a_harness_failure(tmp_path, fake_openrouter):
+    # S13: the scaffold's step cap ending the loop is a consumer outcome.
     fake = fake_openrouter
     fake.runaway = True
     config = loop_config(tmp_path, loop_manifest())
@@ -561,8 +581,83 @@ def test_step_cap_bounds_a_runaway_loop(tmp_path, fake_openrouter):
     meta = result.results[0]
     assert meta["loop"]["step_cap_hit"] is True
     assert meta["loop"]["steps"] == LOOP_SCAFFOLD_V1.step_cap
-    assert "step cap" in meta["harness_failure"]
+    assert meta["harness_failure"] is None and result.failures == 0
+    assert meta["consumer_limit"]["cause"] == "step_cap"
+    assert meta["consumer_limit"]["step_cap"] == LOOP_SCAFFOLD_V1.step_cap
+    assert meta["answer_chars"] == 0
+    assert (config.run_dir / "loop-cell" / "A" / "A1" / "answer.txt").read_text() == ""
+    assert result.consumer_limits == {"loop-cell/A1": "step_cap"}
+    run_manifest = json.loads((config.run_dir / "run-manifest.json").read_text())
+    assert run_manifest["consumer_limits"] == {"loop-cell/A1": "step_cap"}
+    assert run_manifest["voided_cells"] == {} and run_manifest["failures"] == 0
     assert len(fake.scored_requests) == LOOP_SCAFFOLD_V1.step_cap
+
+
+def test_context_limit_after_tool_calls_is_a_consumer_limit(tmp_path, fake_openrouter):
+    # S13, the deny-r05 shape: the consumer's own tool results grow a request past the
+    # served endpoint's listed context_length and the endpoint refuses it (4xx).
+    fake = fake_openrouter
+    fake.runaway = True                      # keeps calling tools; results accumulate
+    fake.context_limit_tokens = 600          # the first request fits, the second does not
+    for endpoint in fake.endpoints[MODEL]:
+        endpoint["context_length"] = 600
+    lines_logged: list[str] = []
+    config = loop_config(tmp_path, loop_manifest(), log=lines_logged.append)
+    result = run(config)
+    meta = result.results[0]
+    assert meta["harness_failure"] is None and result.failures == 0
+    limit = meta["consumer_limit"]
+    assert limit["cause"] == "context_length" and limit["http_status"] == 400
+    assert limit["tool_calls_before"] == 1
+    assert limit["listed_context_length"] == 600 and limit["listed_context_source"].startswith("pinned endpoint")
+    assert limit["estimated_request_tokens"] > 600
+    assert limit["endpoint_stated"]["max_tokens"] == 600 and limit["endpoint_stated"]["requested_tokens"] > 600
+    assert "maximum context length" in limit["endpoint_message"]
+    assert meta["loop"]["steps"] == 2 and meta["loop"]["tool_calls"] == 1
+    assert meta["tool_calls"] == ["list_unfiled_notes"]  # the trace is complete
+    assert meta["answer_chars"] == 0
+    assert result.consumer_limits == {"loop-cell/A1": "context_length"}
+    assert any("CONSUMER LIMIT (context_length)" in line for line in lines_logged)
+    assert any(line.startswith("consumer limits: 1") for line in lines_logged)
+    # The refused request is still on the wire as an error response, never a mismatch.
+    assert meta["loop"]["error_responses"] == [{"seq": 2, "note": "upstream answered HTTP 400"}]
+    assert meta["loop"]["provider_mismatches"] == []
+    assert "loop-cell" not in result.voided_cells
+
+
+def test_other_upstream_4xx_after_tool_calls_stays_an_instrument_outcome(tmp_path, fake_openrouter):
+    # S13's rule is mechanical: a 4xx that is NOT a context overflow keeps today's
+    # classification (a harness failure), even after tool calls.
+    fake = fake_openrouter
+    fake.status_sequence = [200, 200, 403]  # probe, first scored request, then a 403 (no retry)
+    config = loop_config(tmp_path, loop_manifest())
+    result = run(config)
+    meta = result.results[0]
+    assert meta["consumer_limit"] is None
+    assert meta["harness_failure"] and "runner exited 2" in meta["harness_failure"]
+    assert result.consumer_limits == {}
+
+
+def test_product_rows_carry_the_family_mark(tmp_path, fake_drivers):
+    # WO-2 item 2 / S11: driver_family on every row and cell entry, not inferred from the id.
+    from mcp_e2e_harness.runner import RunConfig as RC
+
+    data = manifest_data(checks=[{"id": "typed", "description": "d", "applies_to": {"tool": "*"},
+                                  "assert": {"present": ["/response/content"]}}])
+    manifest = load_manifest(write_manifest(tmp_path, data))
+    config = RC(manifest=manifest, run_dir=tmp_path / "run", cells=["basic"], drivers=fake_drivers,
+                timeout_s=120, log=lambda line: None)
+    result = run(config)
+    assert result.failures == 0
+    meta = result.results[0]
+    assert meta["driver_family"] == "product"
+    assert "scaffold" not in meta and "reproducibility" not in meta
+    assert meta["consumer_limit"] is None
+    run_manifest = json.loads((config.run_dir / "run-manifest.json").read_text())
+    assert run_manifest["cell_marks"] == {"basic": {"driver_family": "product"}}
+    assert run_manifest["loop_cells"] == {}
+    report = json.loads((config.run_dir / "checks-report.json").read_text())
+    assert report["cells"]["basic"] == {"driver": "fake", "driver_family": "product"}
 
 
 def test_retryable_status_is_retried_and_visible_on_the_wire(tmp_path, fake_openrouter):

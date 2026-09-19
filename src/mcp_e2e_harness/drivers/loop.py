@@ -50,6 +50,7 @@ from .. import __version__
 from ..api_capture import ApiSurfaceRecorder, loop_digest
 from ..loop_scaffold import LoopScaffold, get_scaffold
 from ..openrouter import (
+    BASIS_LOOP,
     DEPLOYMENTS,
     OPENROUTER,
     Catalog,
@@ -87,13 +88,24 @@ def cell_marks(cell: dict) -> dict:
     the reproducibility mark, the deployment, and the data policy."""
     fields = loop_fields(cell)
     scaffold = get_scaffold(fields["scaffold"] or "")
+    pin = fields["provider"]
+    slug, quant = parse_pin(pin) if pin else (None, None)
     return {
         "driver_family": "loop",
         "scaffold": {"name": fields["scaffold"],
                      "content_hash": scaffold.content_hash() if scaffold else None},
         "endpoint": fields["endpoint"],
-        "provider_pin": fields["provider"] or "unpinned",
-        "reproducibility": "pinned" if fields["provider"] else "unpinned",
+        "provider_pin": pin or "unpinned",
+        # What the pin verifies, stated exactly (50-drivers.md loop #4, amended
+        # 2026-09-18): the served-provider check verifies the SLUG; the quantization
+        # component is sent as provider.quantizations, enforced by the router on its
+        # own declaration, and no artifact can confirm it.
+        "pin_slug_verified_against": slug,
+        "quantization_asserted": quant,
+        "pin_verification": ("slug verified per request against the response's provider name; "
+                             "quantization asserted (router-enforced, unverifiable from response "
+                             "metadata)") if pin else None,
+        "reproducibility": "pinned" if pin else "unpinned",
         "data_policy": fields["data_policy"],
     }
 
@@ -254,6 +266,7 @@ class LoopDriver(Driver):
             return None
         catalog = self.catalog()
         record: dict = {"upstream": self.upstream(), "cells": {}, "estimate_usd_total": None,
+                        "estimate_basis": BASIS_LOOP,
                         "run_budget_usd": budget_usd, "catalog_errors": []}
         total = 0.0
         total_known = True
@@ -271,7 +284,7 @@ class LoopDriver(Driver):
             try:
                 pricing = catalog.model_pricing(cell["model"])
                 entry["pricing_per_token"] = pricing
-                estimate = estimate_invocation_usd(cell["context"], pricing)
+                estimate = estimate_invocation_usd(cell["context"], pricing, basis="loop")
                 estimate["invocations"] = n
                 estimate["usd_total"] = round(estimate["usd"] * n, 6) if estimate["usd"] is not None else None
                 entry["estimate"] = estimate
@@ -321,6 +334,7 @@ class LoopDriver(Driver):
                     f"HQ {d['headquarters'] or 'n/a'} -- {d['honesty_limit']}")
         record["estimate_usd_total"] = round(total, 6) if total_known else None
         log("loop cost  : " + (f"ESTIMATE ${total:.4f} total" if total_known else "estimate incomplete")
+            + f" on the {BASIS_LOOP}"
             + " -- reasoning tokens are the unbounded term; the cap is what bounds spend"
             + (f"; run cap ${budget_usd:.2f}" if budget_usd is not None else "; no run cap set"))
         for err in record["catalog_errors"]:
@@ -532,8 +546,15 @@ class LoopDriver(Driver):
             if isinstance(breach, dict):
                 breaches.append(f"loop {suffix} turn: {breach.get('kind')}: {breach.get('detail')}")
         scored = results.get("turn") or {}
+        # The verified half of the pin, per row: the served name(s) that matched it.
+        verified_names = sorted({line.get("provider") for line in digest["lines"]
+                                 if line not in error_lines and line.get("provider")
+                                 and pin and served_matches_pin(line.get("provider"), pin,
+                                                                self._pin_names.get(f"{cell['model']}|{pin}"))})
         record = {
             **marks,
+            "provider_verified": (verified_names[0] if len(verified_names) == 1 else
+                                  (verified_names or None)) if pin and not mismatches else None,
             "served_providers": digest["served_providers"],
             "provider_mismatches": mismatches,
             "provider_unread": digest["provider_unread"],
@@ -553,4 +574,5 @@ class LoopDriver(Driver):
             "consumer_error": scored.get("error"),
             "probe": self._gates.get(cell_name or ""),
         }
-        return {"record": record, "breaches": breaches, "cost_usd": digest["usage"]["cost_usd"]}
+        return {"record": record, "breaches": breaches, "cost_usd": digest["usage"]["cost_usd"],
+                "consumer_limit": scored.get("consumer_limit")}

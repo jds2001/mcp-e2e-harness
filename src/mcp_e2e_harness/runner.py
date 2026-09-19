@@ -105,6 +105,9 @@ class RunResult:
     # Budget-cap stops (run-level or per-cell), each a surfaced run-level outcome.
     budget_stops: list[dict] = field(default_factory=list)
     spend_usd: float = 0.0
+    # Answerless consumer outcomes (S13): invocation label -> cause. Counted beside
+    # pass and fail, never under broken; not harness failures.
+    consumer_limits: dict[str, str] = field(default_factory=dict)
 
 
 def plan_invocations(manifest: Manifest, cells: list[str],
@@ -579,14 +582,23 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     family_record: dict | None = None
     breaches: list[str] = []
     spend_usd: float | None = None
+    consumer_limit: dict | None = None
     if not config.dry_run:
         extra = driver.after_turn(turn, dest, cell, dest / "api-surface.jsonl", cell_name)
         if extra is not None:
             family_record = extra.get("record")
             breaches = list(extra.get("breaches") or [])
             spend_usd = extra.get("cost_usd")
+            consumer_limit = extra.get("consumer_limit") or None
             if breaches and harness_failure is None:
                 harness_failure = breaches[0]
+            # S13: an answerless turn the consumer caused (endpoint context limit
+            # after its own tool calls; the scaffold's step cap) is a consumer
+            # outcome. The instrument captured everything, so the two answerless
+            # harness-failure shapes are lifted; a breach or any other failure stays.
+            if consumer_limit and harness_failure and (
+                    harness_failure.startswith("runner exited") or harness_failure.startswith("empty answer")):
+                harness_failure = None
     if api_surface and api_surface.get("wire_surface_mismatches"):
         breaches.append("wire tools array differs from the cell's surface (S7 exact)")
     if api_surface and api_surface.get("disallowed_builtins_on_wire"):
@@ -610,12 +622,14 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "cell": cell_name,
         "cell_id": cell_id_of(cell_name, cell, driver),
         "driver": {"id": cell["driver"], "cli_version": driver_versions.get(cell["driver"])},
-        # S11 marks: family, scaffold with hash, pin or unpinned, reproducibility --
-        # present on every artifact naming a loop cell; product-driver cells carry
-        # none of these keys (their contracts add no marks).
-        **({"driver_family": marks["driver_family"], "scaffold": marks["scaffold"],
-            "provider_pin": marks["provider_pin"], "reproducibility": marks["reproducibility"]}
-           if marks else {}),
+        # S11 marks: the family on every row ("product" | "loop"); loop rows add the
+        # scaffold with hash, the pin (slug verified, quantization asserted) or
+        # unpinned, and the reproducibility mark.
+        "driver_family": marks["driver_family"],
+        **({"scaffold": marks["scaffold"], "provider_pin": marks["provider_pin"],
+            "quantization_asserted": marks["quantization_asserted"],
+            "reproducibility": marks["reproducibility"]}
+           if "scaffold" in marks else {}),
         "model": cell["model"],
         # The cell's knobs in the driver's native vocabulary, verbatim -- never
         # translated, never defaulted by the harness.
@@ -633,6 +647,10 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "duration_s": duration,
         "exit_status": exit_status,
         "harness_failure": harness_failure,
+        # S13: the answerless consumer outcome, when the turn ended because the
+        # consumer ran into a limit ({"cause": "context_length" | "step_cap", ...}).
+        # answer.txt is empty for such a row; this is where it says so.
+        "consumer_limit": consumer_limit,
         "trace_records": len(records),
         "trace_parse_errors": parse_errors,
         "tool_calls": [r.get("tool", "?") for r in records],
@@ -1239,6 +1257,7 @@ def run(config: RunConfig) -> RunResult:
     voided: dict[str, str] = {}
     failures = 0
     cell_gates: dict[str, dict] = {}
+    consumer_limits: dict[str, str] = {}
     budget_stops: list[dict] = []
     spend_run = 0.0
     spend_cell: dict[str, float] = {}
@@ -1338,6 +1357,10 @@ def run(config: RunConfig) -> RunResult:
             if meta["harness_failure"]:
                 failures += 1
                 flag = f"  HARNESS FAILURE: {meta['harness_failure'][:90]}"
+            elif meta.get("consumer_limit"):
+                consumer_limits[f"{cell_name}/{entry['id']}"] = meta["consumer_limit"]["cause"]
+                flag = (f"  CONSUMER LIMIT ({meta['consumer_limit']['cause']}): no answer -- "
+                        "a consumer outcome, not a harness failure (S13)")
             family = meta.get(driver.family) if driver.family != "product" else None
             loop_note = ""
             if family:
@@ -1392,7 +1415,8 @@ def run(config: RunConfig) -> RunResult:
     for cell_name in config.cells:
         cell = manifest.cells[cell_name]
         marks = config.drivers[cell["driver"]].cell_marks(cell)
-        if marks is None:
+        if "scaffold" not in marks:
+            cell_marks[cell_name] = marks  # product family: the family mark alone
             continue
         served: dict[str, int] = {}
         family = config.drivers[cell["driver"]].family
@@ -1405,6 +1429,12 @@ def run(config: RunConfig) -> RunResult:
                                  "probe": ({k: cell_gates[cell_name].get(k) for k in
                                             ("verdict", "cached", "probed_at", "served_provider", "cache_path")}
                                            if cell_name in cell_gates else None)}
+        if marks.get("provider_pin") != "unpinned":
+            rows = [m for m in results if m["cell"] == cell_name]
+            verified = {v for m in rows for v in ([(m.get(family) or {}).get("provider_verified")]
+                                                  if isinstance((m.get(family) or {}).get("provider_verified"), str)
+                                                  else ((m.get(family) or {}).get("provider_verified") or []))}
+            cell_marks[cell_name]["provider_verified"] = sorted(verified) or None
 
     checks_report: list[dict] = []
     if manifest.checks and not config.dry_run:
@@ -1439,6 +1469,10 @@ def run(config: RunConfig) -> RunResult:
         log(f"spend      : ${spend_run:.6f} actual (summed usage.cost)"
             + (f"  of run cap ${config.budget_usd:.2f}" if config.budget_usd is not None else ""))
 
+    if consumer_limits:
+        log(f"consumer limits: {len(consumer_limits)}  (answerless consumer outcomes, S13 -- scored as a "
+            f"failure to answer, NOT harness failures): "
+            + ", ".join(f"{k} [{v}]" for k, v in consumer_limits.items()))
     log(f"harness failures: {failures}  (these are NOT consumer results)")
     log("This harness does not score. Pass/fail against the pinned criteria in each "
         "meta.json is a human/spec-session judgment.")
@@ -1466,7 +1500,11 @@ def run(config: RunConfig) -> RunResult:
         # the served-provider set and spend actually observed.
         "pre_run": pre_run_records,
         "cell_gates": cell_gates,
+        # S11 family marks for every cell ("product" carries the family alone).
+        "cell_marks": cell_marks,
         "loop_cells": {c: m for c, m in cell_marks.items() if m.get("driver_family") == "loop"},
+        # S13: answerless consumer outcomes, counted beside pass and fail, never broken.
+        "consumer_limits": consumer_limits,
         # Spend and caps: the run-level outcome the budget stop is (loop #6).
         "budget": {"run_cap_usd": config.budget_usd,
                    "spent_usd": round(spend_run, 8),
@@ -1481,4 +1519,5 @@ def run(config: RunConfig) -> RunResult:
     return RunResult(run_dir=config.run_dir, results=results, failures=failures,
                      zero_trace_cells=dead, checks_report=checks_report,
                      driver_probes=driver_probes, voided_cells=voided,
-                     budget_stops=budget_stops, spend_usd=round(spend_run, 8))
+                     budget_stops=budget_stops, spend_usd=round(spend_run, 8),
+                     consumer_limits=consumer_limits)

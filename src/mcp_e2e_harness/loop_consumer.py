@@ -16,7 +16,11 @@ The prompt arrives on stdin; the final assistant text is stdout and nothing else
 progress and diagnostics go to stderr; the structured outcome lands in the
 ``result_path`` the turn file names. Exit codes: 0 answer produced; 2 harness/IO
 failure; 3 instrument breach (served-provider mismatch, strict-routing refusal,
-surface drift between session turns); 4 step cap reached without an answer.
+surface drift between session turns); 4 a consumer limit (ruling S13): the turn ended
+without an answer because the consumer's own tool calls grew a request past the served
+endpoint's context length and the endpoint refused it, or because the scaffold's step
+cap ended the loop -- a consumer outcome, not a harness failure, recorded under
+``consumer_limit`` in the result file.
 
 Modes: ``turn`` runs the tool loop against the MCP servers in the harness-written
 config (the SUT through the trace proxy, the distractor beside it in crowded cells);
@@ -45,9 +49,12 @@ from typing import Any
 
 from .loop_scaffold import LoopScaffold, get_scaffold, validate_probe_arguments
 from .mcp_client import MCPClientError, StdioMCPClient
-from .openrouter import served_matches_pin
+from .openrouter import EST_BYTES_PER_TOKEN, served_matches_pin
 
-EXIT_OK, EXIT_ERROR, EXIT_BREACH, EXIT_STEP_CAP = 0, 2, 3, 4
+EXIT_OK, EXIT_ERROR, EXIT_BREACH, EXIT_LIMIT = 0, 2, 3, 4
+
+_CONTEXT_MAX_RE = re.compile(r"maximum context length is (\d[\d,]*) tokens", re.I)
+_CONTEXT_REQ_RE = re.compile(r"requested about (\d[\d,]*) tokens", re.I)
 
 # OpenAI-compatible function names; a server tool name outside this set cannot be
 # offered verbatim, which is an instrument limit reported loudly, never mangled.
@@ -69,6 +76,16 @@ class LoopBreach(RuntimeError):
 
 class LoopError(RuntimeError):
     """A harness/IO failure: not a consumer result."""
+
+
+class LoopLimit(RuntimeError):
+    """The consumer ran itself into a limit (ruling S13): a consumer outcome."""
+
+    def __init__(self, cause: str, detail: str, record: dict):
+        super().__init__(f"{cause}: {detail}")
+        self.cause = cause
+        self.detail = detail
+        self.record = record
 
 
 def wire_tool_name(server_name: str, tool_name: str) -> str:
@@ -147,6 +164,10 @@ class ChatClient:
             raise LoopError(f"{config.api_key_env} is not set in the consumer's environment")
         self._key = key
         self.retries = 0
+        # Turn state the S13 classification needs: tool calls so far in this turn and
+        # the provider that served the previous response (the "served endpoint").
+        self.turn_tool_calls = 0
+        self.last_served: str | None = None
 
     def complete(self, body: dict) -> dict:
         """POST one chat completion; returns the parsed response. Retries only the
@@ -218,7 +239,74 @@ class ChatClient:
                 f"the router refused the request under strict routing (HTTP {status}: "
                 f"{message or 'no message'}); {named}. Under require_parameters the refusal is "
                 "loud; without it the same knob would be silently dropped (P-knob-drop).")
+        if 400 <= status < 500 and self.turn_tool_calls >= 1:
+            limit = self._context_limit(status, message, body)
+            if limit is not None:
+                raise LoopLimit("context_length", limit["detail"], limit)
         raise LoopError(f"HTTP {status} from the endpoint: {message or 'no message'}")
+
+    def _context_limit(self, status: int, message: str, body: dict) -> dict | None:
+        """S13's mechanical rule: a 4xx on a request whose recorded size exceeds the
+        served endpoint's listed context length, after at least one tool call, is a
+        consumer limit. The size is the request body as sent, converted at the
+        measured bytes-per-token ratio; the listed length is the pinned endpoint's, or
+        the previously served provider's endpoint(s), from the deployment's listing.
+        The endpoint's own numbers, when its message states them, are recorded beside
+        the rule's inputs. None when the rule does not fire."""
+        request_bytes = len(json.dumps(body).encode("utf-8"))
+        estimated_tokens = round(request_bytes / EST_BYTES_PER_TOKEN)
+        listed, source = self._listed_context_length()
+        stated_max = _CONTEXT_MAX_RE.search(message or "")
+        stated_req = _CONTEXT_REQ_RE.search(message or "")
+        stated = {"max_tokens": int(stated_max.group(1).replace(",", "")) if stated_max else None,
+                  "requested_tokens": int(stated_req.group(1).replace(",", "")) if stated_req else None}
+        exceeds_listed = listed is not None and estimated_tokens > listed
+        exceeds_stated = (stated["max_tokens"] is not None and stated["requested_tokens"] is not None
+                          and stated["requested_tokens"] > stated["max_tokens"])
+        if not (exceeds_listed or exceeds_stated):
+            return None
+        return {
+            "cause": "context_length",
+            "http_status": status,
+            "endpoint_message": (message or "")[:600],
+            "request_bytes": request_bytes,
+            "estimated_request_tokens": estimated_tokens,
+            "listed_context_length": listed,
+            "listed_context_source": source,
+            "endpoint_stated": stated,
+            "tool_calls_before": self.turn_tool_calls,
+            "rule": ("S13: 4xx on a request whose size exceeds the served endpoint's listed "
+                     "context length, after >=1 tool call in the turn"),
+            "detail": (f"HTTP {status}: the request (~{estimated_tokens:,} tokens from {request_bytes:,} "
+                       f"bytes) exceeded the endpoint's context length "
+                       f"({listed if listed is not None else 'unlisted'} listed"
+                       + (f"; endpoint states {stated['requested_tokens']:,} > {stated['max_tokens']:,}"
+                          if exceeds_stated else "")
+                       + f") after {self.turn_tool_calls} tool call(s): a consumer outcome, not a harness failure"),
+        }
+
+    def _listed_context_length(self) -> tuple[int | None, str | None]:
+        url = (self.config.api_base.rstrip("/")
+               + f"/models/{urllib.parse.quote(self.config.model, safe='/')}/endpoints")
+        try:
+            with urllib.request.urlopen(urllib.request.Request(url), timeout=20) as response:
+                listing = json.loads(response.read().decode("utf-8"))
+        except (urllib.error.URLError, OSError, ValueError):
+            return None, None
+        endpoints = ((listing.get("data") or {}).get("endpoints") or []) if isinstance(listing, dict) else []
+        lengths = [e.get("context_length") for e in endpoints if isinstance(e.get("context_length"), int)]
+        if self.config.provider_pin:
+            for e in endpoints:
+                if e.get("tag") == self.config.provider_pin and isinstance(e.get("context_length"), int):
+                    return e["context_length"], f"pinned endpoint {self.config.provider_pin}"
+        if self.last_served:
+            mine = [e.get("context_length") for e in endpoints
+                    if e.get("provider_name") == self.last_served and isinstance(e.get("context_length"), int)]
+            if mine:
+                return max(mine), f"endpoint(s) of the previously served provider {self.last_served}"
+        if lengths:
+            return max(lengths), "largest listed endpoint (served endpoint unknown)"
+        return None, None
 
     def _undeclared_knobs(self, sent_knobs: list[str]) -> list[str] | None:
         """Knobs the pinned endpoint's listing does not declare; None when unreadable."""
@@ -357,7 +445,8 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
     result: dict[str, Any] = {"mode": "turn", "scaffold": scaffold.full_name,
                               "scaffold_hash": scaffold.content_hash(), "steps": 0,
                               "tool_calls": 0, "step_cap": scaffold.step_cap, "step_cap_hit": False,
-                              "served_providers": {}, "breach": None, "session_mode": config.session_mode}
+                              "served_providers": {}, "breach": None, "consumer_limit": None,
+                              "session_mode": config.session_mode}
     usage = Usage()
     session: dict | None = None
     if config.session_mode == "resume":
@@ -383,9 +472,15 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
         answer: str | None = None
         for step in range(1, scaffold.step_cap + 1):
             result["steps"] = step
-            response = client.complete(build_request(config, messages, tools))
+            try:
+                response = client.complete(build_request(config, messages, tools))
+            except LoopLimit as limit:
+                result["consumer_limit"] = limit.record
+                log(f"CONSUMER LIMIT -- {limit.detail}")
+                break
             usage.add(response.get("usage"))
             served = check_served_provider(config, response, step)
+            client.last_served = served
             key = served or "(absent)"
             result["served_providers"][key] = result["served_providers"].get(key, 0) + 1
             choices = response.get("choices") or []
@@ -400,10 +495,17 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
                 break
             for call in calls:
                 result["tool_calls"] += 1
+                client.turn_tool_calls += 1
                 messages.append({"role": "tool", "tool_call_id": call.get("id"),
                                  "content": _execute_call(call, by_wire, log)})
-        if answer is None:
+        if answer is None and result["consumer_limit"] is None:
             result["step_cap_hit"] = True
+            result["consumer_limit"] = {
+                "cause": "step_cap", "step_cap": scaffold.step_cap, "tool_calls": result["tool_calls"],
+                "rule": "S13: the scaffold's step cap ended the loop before a final answer",
+                "detail": (f"the step cap ({scaffold.step_cap} requests) ended the turn without a final "
+                           "answer: a consumer outcome, not a harness failure"),
+            }
     finally:
         for c in clients.values():
             c.close()
@@ -528,9 +630,9 @@ def execute(config: TurnConfig, prompt: str, out=sys.stdout, log=_log) -> int:
         log(f"error: {exc}")
         return EXIT_ERROR
     result_path.write_text(json.dumps(result, indent=2) + "\n")
-    if result["step_cap_hit"]:
-        log(f"step cap {scaffold.step_cap} reached without a final answer")
-        return EXIT_STEP_CAP
+    if result["consumer_limit"] is not None:
+        log(f"consumer limit ({result['consumer_limit']['cause']}): no answer produced")
+        return EXIT_LIMIT
     out.write(answer)
     out.flush()
     return EXIT_OK

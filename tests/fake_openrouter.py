@@ -39,14 +39,17 @@ class FakeOpenRouter:
         self.tool_arguments = "{}"
         self.cost_per_request: float | None = 0.001
         self.status_sequence: list[int] = []             # forced statuses, consumed in order
+        self.context_limit_tokens: int | None = None      # 400 once a request (bytes/2.83) exceeds it
         self.reasoning_tokens = 3
         self.models = [{"id": MODEL, "pricing": {"prompt": "0.00000015", "completion": "0.0000006"},
                         "supported_parameters": ["tools", "max_tokens", "reasoning", "temperature"]}]
         self.endpoints = {MODEL: [
             {"provider_name": PROVIDER, "tag": PIN, "quantization": "bf16", "status": 0,
+             "context_length": 131072,
              "supported_parameters": ["tools", "max_tokens", "reasoning"],
              "pricing": {"prompt": "0.00000003", "completion": "0.00000017"}},
             {"provider_name": "Other", "tag": "other/fp8", "quantization": "fp8", "status": 0,
+             "context_length": 131072,
              "supported_parameters": ["tools", "max_tokens", "reasoning", "temperature"],
              "pricing": {"prompt": "0.00000005", "completion": "0.00000025"}},
         ]}
@@ -149,6 +152,15 @@ class FakeOpenRouter:
             provider = None
         if self.refuse_knobs & set(body) and (body.get("provider") or {}).get("require_parameters"):
             return 404, {"error": {"message": REFUSAL_MESSAGE, "code": 404}}
+        if self.context_limit_tokens is not None:
+            estimated = round(len(json.dumps(body).encode()) / 2.83)
+            if estimated > self.context_limit_tokens:
+                # The deny-r05 shape (2026-09-18): the endpoint refuses a request the
+                # consumer's own tool results grew past its context length.
+                return 400, {"error": {"message": (
+                    f"This endpoint's maximum context length is {self.context_limit_tokens} tokens. "
+                    f"However, you requested about {estimated} tokens. Please reduce the length."),
+                    "code": 400}}
         tools = body.get("tools") or []
         names = [t["function"]["name"] for t in tools]
         messages = body.get("messages") or []

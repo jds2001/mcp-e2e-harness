@@ -152,10 +152,11 @@ class Driver(ABC):
 
     # ---- family hooks: no-ops for product drivers; the loop driver fills them in.
 
-    def cell_marks(self, cell: dict) -> dict | None:  # noqa: ARG002
-        """Identity/family marks every artifact naming this cell must carry (S11);
-        None for drivers whose contract adds none."""
-        return None
+    def cell_marks(self, cell: dict) -> dict:  # noqa: ARG002
+        """Identity/family marks every artifact naming this cell must carry (S11).
+        Product drivers carry the family mark alone (``driver_family: "product"``,
+        WO-2 item 2); the loop driver adds scaffold, pin, and reproducibility."""
+        return {"driver_family": self.family}
 
     def cell_identity(self, cell: dict) -> list[str]:  # noqa: ARG002
         """Extra cell-identity components this driver's contract adds (10-harness.md,
