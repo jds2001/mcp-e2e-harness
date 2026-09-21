@@ -19,6 +19,10 @@ In `uscode-mcp/runs/2026-09-21T01:13:27-04:00-loop-complete` 7 of 26 loop rows h
 
 A fake-upstream run, `--repeats 3` on one cell, where the fake's final response on repetition 2 is `content: null`, no tool calls, `finish_reason: stop`, with reasoning text ending in a JSON object whose keys are parameters of one offered tool: that row's empty `answer.txt`, its `meta.json` showing the outcome with both marks and `harness_failure: null`, null digest, `answer_chars: 0`; `answers` reading `invocations: 3, answered: 2`; the run manifest's count of the outcome; the scaffold hash unchanged. The same run on a fresh cell showing the transcript file in every row, and the reasoning text present there and in no other artifact.
 
+## Status
+
+**Accepted 2026-09-21** from `runs/2026-09-21-wo7/` with the report read second; commit 36102ab. Record, and one ruling on the zero-trace exemption the implementation introduced, in `10-harness.md` → Layer 2; follow-up in WO-8.
+
 ## Out of scope
 
 Any retry or re-prompt — that is `loop-scaffold@2` if it is ever wanted (S16 corollary), and it is not ordered. Re-reading the uscode-mcp run: its rows stand as recorded, and its spec session identifies the affected rows by digest.
