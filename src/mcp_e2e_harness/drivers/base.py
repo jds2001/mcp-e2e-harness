@@ -177,6 +177,10 @@ class Driver(ABC):
         {"ok", "reason", "record", "cost_usd"} -- a not-ok gate BREAKS the cell."""
         return None
 
+    def preturn_outcome(self, turn: TurnSpec, exit_status: int) -> dict | None:
+        """Return a reported consumer outcome, when the driver supports it."""
+        return None
+
     def after_turn(self, turn: TurnSpec, dest: Path, cell: dict,
                    api_surface_path: Path, cell_name: str | None = None) -> dict | None:  # noqa: ARG002
         """Driver-specific reading of the invocation's artifacts after the turn ran:

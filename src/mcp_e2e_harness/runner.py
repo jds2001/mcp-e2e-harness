@@ -74,6 +74,7 @@ class RunConfig:
     prompts: set[str] | None = None
     dry_run: bool = False
     repeats: int | None = None
+    precondition_retries: int = 3
     timeout_s: int = DEFAULT_TIMEOUT_S
     drivers: dict[str, Driver] = field(default_factory=lambda: dict(DRIVERS))
     # Run-level spend cap in USD (50-drivers.md loop #6): summed actual usage.cost
@@ -111,6 +112,9 @@ class RunResult:
     # Answerless consumer outcomes (S13): invocation label -> cause. Counted beside
     # pass and fail, never under broken; not harness failures.
     consumer_limits: dict[str, str] = field(default_factory=dict)
+    preconditions_unmet: dict[str, dict] = field(default_factory=dict)
+    invocation_counts: dict[str, dict] = field(default_factory=dict)
+    slots: dict[str, dict] = field(default_factory=dict)
 
 
 def plan_invocations(manifest: Manifest, cells: list[str],
@@ -207,8 +211,9 @@ def row_relative_path(config: RunConfig, cell: str, group: str, prompt: str,
 
 
 def meta_relative_path(config: RunConfig, meta: dict) -> Path:
-    return row_relative_path(config, meta["cell"], meta["group"],
+    path = row_relative_path(config, meta["cell"], meta["group"],
                              meta["prompt_id"], meta.get("repetition"))
+    return path / f"attempt-{meta['attempt']:02d}" if meta.get("attempt", 1) > 1 else path
 
 
 def scan_set_for(config: RunConfig, driver: Driver) -> list[str]:
@@ -368,6 +373,14 @@ def _write_scanned(path: Path, text: str, scan: list[str]) -> None:
     path.write_text(text)
 
 
+class PreconditionUnmet(HarnessError):
+    def __init__(self, outcome: dict, record: dict, path: Path):
+        self.outcome = {**outcome, "stage": "crowding_preturn"}
+        self.record = record
+        super().__init__(f"{outcome['cause']}: crowding precondition unmet: "
+                         f"{outcome.get('detail')}; scored turn not sent. See {path}.")
+
+
 def _crowding_preturn(driver: Driver, ctx_base: dict, procedure: crowding.CrowdingProcedure,
                       dest: Path, cwd: Path, timeout_s: int, scan: list[str],
                       session_id: str, crowd_config: Path) -> dict:
@@ -389,7 +402,12 @@ def _crowding_preturn(driver: Driver, ctx_base: dict, procedure: crowding.Crowdi
         "answer": proc.stdout,
         "stderr_tail": proc.stderr[-2000:],
     }
+    outcome = driver.preturn_outcome(turn, proc.returncode)
+    if outcome:
+        record["consumer_limit"] = outcome
     _write_scanned(dest / "crowding.json", json.dumps(record, indent=2) + "\n", scan)
+    if outcome:
+        raise PreconditionUnmet(outcome, record, dest / "crowding.json")
     if proc.returncode != 0:
         raise HarnessError(
             f"crowding pre-turn exited {proc.returncode}; the consumer is NOT mid-task, so "
@@ -400,12 +418,14 @@ def _crowding_preturn(driver: Driver, ctx_base: dict, procedure: crowding.Crowdi
 
 def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str],
             advertised_tools: list[str] | None = None,
-            repetition: int | None = None) -> dict:
+            repetition: int | None = None, attempt: int = 1) -> dict:
     manifest = config.manifest
     entry, cell_name, cell = planned.entry, planned.cell_name, planned.cell
     driver = config.drivers[cell["driver"]]
     dest = config.run_dir / row_relative_path(
         config, cell_name, entry["group"], entry["id"], repetition)
+    if attempt > 1:
+        dest /= f"attempt-{attempt:02d}"
     dest.mkdir(parents=True, exist_ok=True)
     scan = scan_set_for(config, driver)
 
@@ -459,6 +479,9 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     t0 = time.perf_counter()
     harness_failure: str | None = None
     consumer_limit: dict | None = None
+    precondition_unmet = None
+    precondition_failure = None
+    scored_turn_reached = False
     exit_status = -1
     answer = ""
     stderr_text = ""
@@ -501,6 +524,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
                 crowding_record = _crowding_preturn(
                     driver, ctx_base, procedure, dest, cwd, config.timeout_s, scan,
                     session_id, dest / "mcp-config-crowding.json")
+            scored_turn_reached = True
             config.log(f"     scored turn: {cell['driver']} {cell['model']}")
             proc = subprocess.run(turn.argv, cwd=cwd, input=turn.stdin_text, env=turn_env,
                                   capture_output=True, text=True, timeout=config.timeout_s)
@@ -522,6 +546,10 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
                     "reasoning_tail_json": None,
                     "reasoning_tail_matches_tools": None,
                 }
+        except PreconditionUnmet as exc:
+            precondition_unmet = exc.outcome
+            crowding_record = exc.record
+            harness_failure = precondition_failure = str(exc)
         except subprocess.TimeoutExpired as exc:
             harness_failure = f"timeout after {config.timeout_s}s -- harness failure, NOT a consumer result"
             partial = exc.stderr
@@ -576,7 +604,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         lowered = [s.casefold() for s in streams]
         web_activity = [m for m in driver.web_event_markers
                         if any(m in s for s in lowered)]
-        if web_activity and harness_failure is None:
+        if web_activity and (harness_failure is None or precondition_unmet):
             harness_failure = (f"web-tool activity suspected in the driver's event streams "
                                f"({','.join(web_activity)}) -- instrument breach; claims not "
                                "tool-attributable")
@@ -590,7 +618,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         api_surface["unparseable_requests"] = recorder.unrecorded_requests
         api_surface["unparseable_encodings"] = sorted(recorder.unrecorded_encodings)
         api_surface["upstream_forward_errors"] = recorder.forward_errors
-        if harness_failure is None:
+        if harness_failure is None or precondition_unmet:
             if api_surface["disallowed_builtins_on_wire"]:
                 # The channel the argv claims closed is open at the wire: an instrument
                 # breach, not a consumer behavior; the row's claims are not
@@ -653,9 +681,12 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     records, parse_errors = _read_trace(dest / "trace.jsonl")
     if (dest / "trace.jsonl").exists():
         assert_clean((dest / "trace.jsonl").read_text(errors="replace"), scan, str(dest / "trace.jsonl"))
-    if parse_errors and not harness_failure:
+    if parse_errors and (not harness_failure or precondition_unmet):
         harness_failure = (f"{parse_errors} unparseable trace line(s) -- instrument defect; "
                            "fix the instrument before any disposition")
+
+    if precondition_unmet and harness_failure != precondition_failure:
+        precondition_unmet = None  # An instrument defect takes precedence.
 
     tools_path = dest / "available-tools.json"
     recorded_surface = json.loads(tools_path.read_text()) if tools_path.exists() else None
@@ -707,6 +738,9 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "duration_s": duration,
         "exit_status": exit_status,
         "harness_failure": harness_failure,
+        "precondition_unmet": precondition_unmet,
+        "attempt": attempt,
+        "scored_turn_reached": scored_turn_reached,
         # S13/S16: answerless consumer outcomes, including limits and null final content.
         # answer.txt is empty for such a row; this is where it says so.
         "consumer_limit": consumer_limit,
@@ -752,7 +786,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "crowding": ({"procedure": procedure.name, "version": procedure.version,
                       "content_hash": procedure.content_hash(),
                       "collision_review": cell["crowding"]["collision_review"],
-                      "preturn_ok": crowding_record is not None}
+                      "preturn_ok": crowding_record is not None and crowding_record["exit_status"] == 0}
                      if procedure is not None else None),
         # Criteria travel WITH the result so a scorer never has to reconstruct them,
         # and so editing one after seeing a result is visible in the diff.
@@ -1271,6 +1305,8 @@ def probe_loop_cells(manifest: Manifest, cells: list[str], out: Path, *, timeout
 
 
 def preflight(config: RunConfig) -> None:
+    if type(config.precondition_retries) is not int or config.precondition_retries < 0:
+        raise HarnessError("--precondition-retries must be an integer >= 0")
     if config.repeats is not None and (type(config.repeats) is not int or config.repeats < 1):
         raise HarnessError("--repeats must be an integer >= 1")
     manifest = config.manifest
@@ -1354,6 +1390,11 @@ def run(config: RunConfig) -> RunResult:
     log(f"run dir    : {config.run_dir}")
     log(f"invocations: {len(planned) * repeat_count}   (one fresh process each -- never batched)"
         + ("   [DRY RUN]" if config.dry_run else ""))
+    worst_attempts = repeat_count * sum(
+        1 + config.precondition_retries if item.cell["context"] == "crowded" else 1
+        for item in planned)
+    log(f"attempts   : expected {len(planned) * repeat_count}; worst-case {worst_attempts} "
+        f"with up to {config.precondition_retries} precondition replacement(s) per crowded slot")
     for driver_id in sorted(driver_ids):
         log(f"driver     : {driver_id}  [{driver_versions[driver_id] or 'not recorded: dry run'}]")
 
@@ -1365,6 +1406,21 @@ def run(config: RunConfig) -> RunResult:
             record = config.drivers[driver_id].pre_run(
                 {c: manifest.cells[c] for c in config.cells}, invocations_per_cell, config.budget_usd, log)
             if record is not None:
+                expected = record.get("estimate_usd_total")
+                estimates = [
+                    (info.get("estimate") or {}).get("usd_total")
+                    for info in record.get("cells", {}).values()]
+                worst = None
+                if estimates and all(value is not None for value in estimates):
+                    worst = round(sum(
+                        info["estimate"]["usd_total"] *
+                        (1 + config.precondition_retries if manifest.cells[name]["context"] == "crowded" else 1)
+                        for name, info in record["cells"].items()), 6)
+                record["precondition_replacements"] = {
+                    "retries": config.precondition_retries,
+                    "expected_usd": expected, "worst_case_usd": worst}
+                log(f"replacement spend ESTIMATE: expected {expected} USD (one attempt per slot); "
+                    f"worst-case {worst} USD (all allowed attempts; same token assumptions)")
                 pre_run_records[driver_id] = record
 
     # Q2 gate for drivers WITHOUT API-boundary capture: before any prompt is spent,
@@ -1404,6 +1460,16 @@ def run(config: RunConfig) -> RunResult:
     failures = 0
     cell_gates: dict[str, dict] = {}
     consumer_limits: dict[str, str] = {}
+    preconditions_unmet: dict[str, dict] = {}
+    invocation_counts: dict[str, dict] = {}
+    slots: dict[str, dict] = {}
+    for item in planned:
+        invocation_counts.setdefault(item.cell_name, {})[item.entry["id"]] = {
+            "asked": repeat_count, "reached": 0, "attempts": 0}
+        for repetition in range(1, repeat_count + 1):
+            slot_path = row_relative_path(config, item.cell_name, item.entry["group"],
+                                          item.entry["id"], repetition if config.repeats is not None else None)
+            slots[slot_path.as_posix()] = {"status": "not_started", "result": None, "attempts": 0}
     budget_stops: list[dict] = []
     spend_run = 0.0
     spend_cell: dict[str, float] = {}
@@ -1478,75 +1544,111 @@ def run(config: RunConfig) -> RunResult:
             for index, item in enumerate(cell_planned):
                 entry = item.entry
                 remaining = len(cell_planned) * (repeat_count - pass_number + 1) - index
-                if over_run_cap():
-                    stop = {"scope": "run", "cap_usd": config.budget_usd, "spent_usd": round(spend_run, 8),
-                            "at": f"{cell_name}/{entry['id']}", "skipped_in_cell": remaining}
-                    budget_stops.append(stop)
-                    run_stopped = True
-                    log(f"BUDGET STOP: run spend ${spend_run:.6f} reached the run cap "
-                        f"${config.budget_usd:.2f} before {cell_name}/{entry['id']}; the run stops "
-                        f"cleanly, completed cells stand, {remaining} prompt(s) in this cell not run.")
-                    break
-                if cell_cap is not None and spend_cell.get(cell_name, 0.0) >= cell_cap:
-                    stop = {"scope": "cell", "cell": cell_name, "cap_usd": cell_cap,
-                            "spent_usd": round(spend_cell[cell_name], 8),
-                            "at": f"{cell_name}/{entry['id']}", "skipped_in_cell": remaining}
-                    budget_stops.append(stop)
-                    capped_cells.add(cell_name)
-                    log(f"BUDGET STOP: cell {cell_name} spend ${spend_cell[cell_name]:.6f} reached its "
-                        f"cap ${cell_cap:.2f} before {entry['id']}; {remaining} prompt(s) in this cell "
-                        "not run. Completed invocations stand.")
-                    break
-                repeat_label = (f" r{pass_number:0{max(2, len(str(repeat_count)))}d}/{repeat_count}"
-                                if config.repeats is not None else "")
-                log(f"  -> {cell_name}/{entry['id']}{repeat_label}"
-                    + ("  [outside cell groups]" if item.outside_cell_groups else ""))
-                meta = run_one(config, item, driver_versions, advertised_tools=advertised,
-                               repetition=pass_number if config.repeats is not None else None)
-                results.append(meta)
-                if meta.get("spend_usd") is not None:
-                    spend_run += float(meta["spend_usd"])
-                    spend_cell[cell_name] = spend_cell.get(cell_name, 0.0) + float(meta["spend_usd"])
-                flag = ""
-                if meta["harness_failure"]:
-                    failures += 1
-                    flag = f"  HARNESS FAILURE: {meta['harness_failure'][:90]}"
-                elif meta.get("consumer_limit"):
-                    limit_label = (meta_relative_path(config, meta).as_posix() if config.repeats is not None
-                                   else f"{cell_name}/{entry['id']}")
-                    consumer_limits[limit_label] = meta["consumer_limit"]["cause"]
-                    outcome_label = ("CONSUMER OUTCOME" if meta["consumer_limit"]["cause"] == "null_final_content"
-                                     else "CONSUMER LIMIT")
-                    flag = (f"  {outcome_label} ({meta['consumer_limit']['cause']}): no answer -- "
-                            "a consumer outcome, not a harness failure (S13)")
-                family = meta.get(driver.family) if driver.family != "product" else None
-                loop_note = ""
-                if family:
-                    served = ",".join(f"{k}x{v}" for k, v in (family.get("served_providers") or {}).items())
-                    loop_note = f"  served={served or 'none'} ${float(meta.get('spend_usd') or 0):.6f}"
-                log(f"     {entry['id']:6s}{repeat_label} {meta['duration_s']:6.1f}s  "
-                    f"{meta['trace_records']:>3} trace record(s)  "
-                    f"{meta['answer_chars']:>6} chars{loop_note}{flag}")
-                # Attribution breach (a disallowed builtin on the wire, web-tool
-                # activity in the driver's event streams, a wire surface that differs
-                # from the cell's, a served-provider mismatch, a strict-routing
-                # refusal): the row is not tool-attributable and the CELL is BROKEN --
-                # refusal is hard, not best-effort (50-drivers.md #5; the measured
-                # failure class includes a web tool fabricating a fetch result
-                # presented as retrieved).
-                breach = list(meta.get("web_activity_suspected") or [])
-                breach += list(meta.get("breaches") or [])
-                if breach:
-                    reason = (f"attribution breach in {entry['id']}: {breach[0][:300]} -- "
-                              "the environment the configuration claims does not hold; no row of "
-                              "this cell is tool-attributable.")
-                    write_cell_void(config.run_dir, cell_name, reason)
-                    voided[cell_name] = reason
-                    remaining = len(cell_planned) * (repeat_count - pass_number + 1) - index - 1
-                    log(f"cell {cell_name}: BROKEN -- {reason}")
-                    if remaining:
-                        log(f"  {remaining} remaining prompt(s) skipped without spending "
-                            "model turns.")
+                slot_name = row_relative_path(
+                    config, cell_name, entry["group"], entry["id"],
+                    pass_number if config.repeats is not None else None).as_posix()
+                slot = slots[slot_name]
+                cause = None
+                for attempt in range(1, config.precondition_retries + 2):
+                    if over_run_cap():
+                        stop = {"scope": "run", "cap_usd": config.budget_usd, "spent_usd": round(spend_run, 8),
+                                "at": f"{cell_name}/{entry['id']}", "skipped_in_cell": remaining}
+                        if attempt > 1:
+                            stop.update(slot=slot_name, attempt=attempt)
+                        slot["status"] = "budget_stopped"
+                        budget_stops.append(stop)
+                        run_stopped = True
+                        log(f"BUDGET STOP: run spend ${spend_run:.6f} reached the run cap "
+                            f"${config.budget_usd:.2f} before {cell_name}/{entry['id']}; the run stops "
+                            f"cleanly, completed cells stand, {remaining} prompt(s) in this cell not run.")
+                        break
+                    if cell_cap is not None and spend_cell.get(cell_name, 0.0) >= cell_cap:
+                        stop = {"scope": "cell", "cell": cell_name, "cap_usd": cell_cap,
+                                "spent_usd": round(spend_cell[cell_name], 8),
+                                "at": f"{cell_name}/{entry['id']}", "skipped_in_cell": remaining}
+                        if attempt > 1:
+                            stop.update(slot=slot_name, attempt=attempt)
+                        slot["status"] = "budget_stopped"
+                        budget_stops.append(stop)
+                        capped_cells.add(cell_name)
+                        log(f"BUDGET STOP: cell {cell_name} spend ${spend_cell[cell_name]:.6f} reached its "
+                            f"cap ${cell_cap:.2f} before {entry['id']}; {remaining} prompt(s) in this cell "
+                            "not run. Completed invocations stand.")
+                        break
+                    if attempt > 1:
+                        log(f"REPLACEMENT: {cause}: {slot_name} attempt {attempt}/"
+                            f"{config.precondition_retries + 1}, whole fresh invocation")
+                    repeat_label = (f" r{pass_number:0{max(2, len(str(repeat_count)))}d}/{repeat_count}"
+                                    if config.repeats is not None else "")
+                    log(f"  -> {cell_name}/{entry['id']}{repeat_label}"
+                        + ("  [outside cell groups]" if item.outside_cell_groups else ""))
+                    meta = run_one(config, item, driver_versions, advertised_tools=advertised,
+                                   repetition=pass_number if config.repeats is not None else None, attempt=attempt)
+                    results.append(meta)
+                    path = meta_relative_path(config, meta).as_posix()
+                    counts = invocation_counts[cell_name][entry["id"]]
+                    counts["attempts"] += 1
+                    reached = meta.get("scored_turn_reached", not meta["harness_failure"])
+                    counts["reached"] += int(reached)
+                    slot["attempts"] = attempt
+                    slot["status"] = "scored" if reached else "failed"
+                    if reached:
+                        slot["result"] = path
+                    if meta.get("spend_usd") is not None:
+                        spend_run += float(meta["spend_usd"])
+                        spend_cell[cell_name] = spend_cell.get(cell_name, 0.0) + float(meta["spend_usd"])
+                    flag = ""
+                    if meta.get("precondition_unmet"):
+                        cause = meta["precondition_unmet"]["cause"]
+                        preconditions_unmet[path] = {"slot": slot_name, "attempt": attempt, "cause": cause}
+                        slot["status"] = "exhausted"
+                        flag = "  PRECONDITION UNMET"
+                    elif meta["harness_failure"]:
+                        failures += 1
+                        flag = "  HARNESS FAILURE"
+                    elif meta.get("consumer_limit"):
+                        limit_label = (meta_relative_path(config, meta).as_posix() if config.repeats is not None
+                                       else f"{cell_name}/{entry['id']}")
+                        consumer_limits[limit_label] = meta["consumer_limit"]["cause"]
+                        outcome_label = ("CONSUMER OUTCOME" if meta["consumer_limit"]["cause"] == "null_final_content"
+                                         else "CONSUMER LIMIT")
+                        flag = (f"  {outcome_label} ({meta['consumer_limit']['cause']}): no answer -- "
+                                "a consumer outcome, not a harness failure (S13)")
+                    family = meta.get(driver.family) if driver.family != "product" else None
+                    loop_note = ""
+                    if family:
+                        served = ",".join(f"{k}x{v}" for k, v in (family.get("served_providers") or {}).items())
+                        loop_note = f"  served={served or 'none'} ${float(meta.get('spend_usd') or 0):.6f}"
+                    log(f"     {entry['id']:6s}{repeat_label} {meta['duration_s']:6.1f}s  "
+                        f"{meta['trace_records']:>3} trace record(s)  "
+                        f"{meta['answer_chars']:>6} chars{loop_note}{flag}")
+                    if meta["harness_failure"]:
+                        log(meta["harness_failure"])
+                    # Attribution breach (a disallowed builtin on the wire, web-tool
+                    # activity in the driver's event streams, a wire surface that differs
+                    # from the cell's, a served-provider mismatch, a strict-routing
+                    # refusal): the row is not tool-attributable and the CELL is BROKEN --
+                    # refusal is hard, not best-effort (50-drivers.md #5; the measured
+                    # failure class includes a web tool fabricating a fetch result
+                    # presented as retrieved).
+                    breach = list(meta.get("web_activity_suspected") or [])
+                    breach += list(meta.get("breaches") or [])
+                    if breach:
+                        reason = (f"attribution breach in {entry['id']}: {breach[0]} -- "
+                                  "the environment the configuration claims does not hold; no row of "
+                                  "this cell is tool-attributable.")
+                        write_cell_void(config.run_dir, cell_name, reason)
+                        voided[cell_name] = reason
+                        remaining = len(cell_planned) * (repeat_count - pass_number + 1) - index - 1
+                        log(f"cell {cell_name}: BROKEN -- {reason}")
+                        if remaining:
+                            log(f"  {remaining} remaining prompt(s) skipped without spending "
+                                "model turns.")
+                        break
+
+                    if not meta.get("precondition_unmet") or attempt > config.precondition_retries:
+                        break
+                if run_stopped or cell_name in capped_cells or cell_name in voided:
                     break
 
     dead = zero_trace_cells(results, config.dry_run)
@@ -1645,6 +1747,12 @@ def run(config: RunConfig) -> RunResult:
         log(f"spend      : ${spend_run:.6f} actual (summed usage.cost)"
             + (f"  of run cap ${config.budget_usd:.2f}" if config.budget_usd is not None else ""))
 
+    if preconditions_unmet:
+        log(f"preconditions unmet: {len(preconditions_unmet)} (unscoreable, counted apart from harness failures)")
+    for cell_name, prompts in invocation_counts.items():
+        for prompt, counts in prompts.items():
+            log(f"invocations {cell_name}/{prompt}: asked {counts['asked']}, "
+                f"reached {counts['reached']}, attempts {counts['attempts']}")
     if consumer_limits:
         log(f"consumer limits: {len(consumer_limits)}  (answerless consumer outcomes, S13 -- scored as a "
             f"failure to answer, NOT harness failures): "
@@ -1658,6 +1766,7 @@ def run(config: RunConfig) -> RunResult:
         "manifest": {"path": str(manifest.path), "sha256": manifest.sha256},
         "generated_utc": _utcnow(),
         "selection": {"cells": config.cells, "repeats": config.repeats,
+                      "precondition_retries": config.precondition_retries,
                       "groups": sorted(config.groups) if config.groups else None,
                       "prompts": sorted(config.prompts) if config.prompts else None},
         "driver_versions": driver_versions,
@@ -1684,6 +1793,9 @@ def run(config: RunConfig) -> RunResult:
         "loop_cells": {c: m for c, m in cell_marks.items() if m.get("driver_family") == "loop"},
         # S13: answerless consumer outcomes, counted beside pass and fail, never broken.
         "consumer_limits": consumer_limits,
+        "preconditions_unmet": preconditions_unmet,
+        "invocation_counts": invocation_counts,
+        "slots": slots,
         # Spend and caps: the run-level outcome the budget stop is (loop #6).
         "budget": {"run_cap_usd": config.budget_usd,
                    "spent_usd": round(spend_run, 8),
@@ -1699,4 +1811,5 @@ def run(config: RunConfig) -> RunResult:
                      zero_trace_cells=dead, checks_report=checks_report,
                      driver_probes=driver_probes, voided_cells=voided,
                      budget_stops=budget_stops, spend_usd=round(spend_run, 8),
-                     consumer_limits=consumer_limits)
+                     consumer_limits=consumer_limits, preconditions_unmet=preconditions_unmet,
+                     invocation_counts=invocation_counts, slots=slots)

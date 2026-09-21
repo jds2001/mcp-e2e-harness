@@ -504,6 +504,21 @@ class LoopDriver(Driver):
 
     # ------------------------------------------------- per-invocation digest
 
+    def preturn_outcome(self, turn: TurnSpec, exit_status: int) -> dict | None:
+        if exit_status != 4:
+            return None
+        path = Path(json.loads(Path(turn.argv[4]).read_text())["result_path"])
+        try:
+            result = json.loads(path.read_text())
+        except (OSError, ValueError):
+            return None
+        outcome = result.get("consumer_limit")
+        if (not result.get("error") and not result.get("breach")
+                and isinstance(outcome, dict)
+                and outcome.get("cause") in {"null_final_content", "step_cap", "context_length"}):
+            return outcome
+        return None
+
     def after_turn(self, turn: TurnSpec, dest: Path, cell: dict, api_surface_path: Path,
                    cell_name: str | None = None) -> dict:
         """The loop record for meta.json, and the breaches the runner voids the cell on.
