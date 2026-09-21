@@ -18,8 +18,9 @@ the size is the raw wire bytes) and ``content_encoding`` (the request's declared
 encoding, null for identity; the one header value the contract names), and -- timing
 (spec 10-harness.md, added 2026-09-18 from WO-1 finding 5) -- ``duration_ms`` from
 request arrival (``at``) to the end of the response, null with ``duration_note`` when
-the response never completed. Timing is a property of the exchange, not a
-response-body extraction, so it is not an allowlist entry. Every line is therefore
+the response never completed. Chat-completion lines also carry ``http_status``
+(WO-8), null if no status was received. Timing and status are properties of the
+exchange, not response-body extractions, so they are not allowlist entries. Every line is therefore
 written when its response ends (``seq`` is still assigned at arrival). Never any
 other header (credentials ride there), never message content, never tool schemas.
 Body-less requests (GETs) are forwarded and not recorded.
@@ -487,6 +488,10 @@ class ApiSurfaceRecorder:
         elapsed = round((time.monotonic() - t0) * 1000, 3) if t0 is not None else None
         record["duration_ms"] = elapsed if completed else None
         record["duration_note"] = None if completed else (incomplete_note or "response did not complete")
+        if entry == "chat_completions":
+            # WO-8 needs positive evidence of a completed 2xx final response.
+            # Status is transport metadata, never response content.
+            record["http_status"] = status
         if entry:
             payload: dict | None = None
             if note is None:

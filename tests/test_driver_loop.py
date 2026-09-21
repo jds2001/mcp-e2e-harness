@@ -312,7 +312,7 @@ def test_pinned_cell_end_to_end(tmp_path, fake_openrouter):
                             "provider", "provider_note", "usage_prompt_tokens", "usage_prompt_tokens_note",
                             "usage_completion_tokens", "usage_completion_tokens_note",
                             "usage_reasoning_tokens", "usage_reasoning_tokens_note",
-                            "usage_cost", "usage_cost_note", "finish_reason", "finish_reason_note"}
+                            "usage_cost", "usage_cost_note", "finish_reason", "finish_reason_note", "http_status"}
     assert [r["finish_reason"] for r in wire] == ["tool_calls", "stop"]
     assert all(r["finish_reason_note"] is None for r in wire)
     assert loop["finish_reason"] == "stop" and loop["finish_reasons"] == {"tool_calls": 1, "stop": 1}
@@ -839,6 +839,8 @@ def test_finish_reason_absent_is_null_with_a_note(tmp_path, fake_openrouter):
     assert result.failures == 0
     wire = read_lines(config.run_dir / "loop-cell" / "A" / "A1" / "api-surface.jsonl")
     assert wire[0]["finish_reason"] is None and "HTTP 503" in wire[0]["finish_reason_note"]
+    assert wire[0]["http_status"] == 503
+    assert wire[-1]["http_status"] == 200
     assert result.results[0]["loop"]["finish_reasons"] == {"(absent)": 1, "tool_calls": 1, "stop": 1}
     assert result.results[0]["loop"]["finish_reason"] == "stop"
 

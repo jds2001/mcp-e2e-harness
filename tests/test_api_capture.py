@@ -342,7 +342,10 @@ def test_duration_ms_is_arrival_to_end_of_response(tmp_path, fake_api_upstream):
     recorder = ApiSurfaceRecorder(tmp_path / "cap.jsonl", fake_api_upstream)
     base = recorder.start()
     try:
-        post(base, "/v1/messages", {"model": "m-1", "tools": [], "messages": []})
+        # Returning from urlopen only establishes receipt of response headers.
+        # Consume the body before asserting that the exchange completed.
+        with post(base, "/v1/messages", {"model": "m-1", "tools": [], "messages": []}) as response:
+            response.read()
     finally:
         recorder.stop()
     (record,) = records(tmp_path)

@@ -660,6 +660,15 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     tools_path = dest / "available-tools.json"
     recorded_surface = json.loads(tools_path.read_text()) if tools_path.exists() else None
 
+    zero_trace_liveness = None
+    if not config.dry_run and not records and (consumer_limit or {}).get("cause") == "null_final_content":
+        zero_trace_liveness = null_final_liveness(
+            config, cell_name, dest, driver.family, api_surface, harness_failure, breaches)
+        if not zero_trace_liveness["exempted"] and harness_failure is None:
+            harness_failure = (
+                "zero-trace null final is BROKEN: exemption requires a loop row, a passed spawn check, "
+                "an exact wire surface on every request, and a completed 2xx final response with finish_reason")
+
     # Row measurements (30-checks.md, S14): mechanical values across a trace record
     # and this row's answer, recorded beside the row with the method's name and hash.
     # Never an outcome; nothing here reaches checks-report.json.
@@ -701,6 +710,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         # S13/S16: answerless consumer outcomes, including limits and null final content.
         # answer.txt is empty for such a row; this is where it says so.
         "consumer_limit": consumer_limit,
+        **({"zero_trace_liveness": zero_trace_liveness} if zero_trace_liveness is not None else {}),
         "trace_records": len(records),
         "trace_parse_errors": parse_errors,
         "tool_calls": [r.get("tool", "?") for r in records],
@@ -785,6 +795,42 @@ def answers_across_prompts(by_prompt: dict[str, dict]) -> dict:
             "distinct": len(union)}
 
 
+def null_final_liveness(config: RunConfig, cell_name: str, dest: Path,
+                        driver_family: str, api_surface: dict | None,
+                        harness_failure: str | None, breaches: list[str]) -> dict:
+    """WO-8: record positive, row-local evidence before exempting a null final."""
+    spawn_path = config.run_dir / cell_name / "spawn-check.json"
+    try:
+        spawn = json.loads(spawn_path.read_text())
+    except (OSError, ValueError):
+        spawn = {}
+    spawn_passed = isinstance(spawn, dict) and spawn.get("ok") is True
+    wire, bad_lines = _read_trace(dest / "api-surface.jsonl")
+    readable = all(isinstance(line, dict) for line in wire)
+    wire = [line for line in wire if isinstance(line, dict)]
+    expected = (api_surface or {}).get("expected_wire_surface")
+    surface_exact = (isinstance(expected, list) and bool(wire) and not bad_lines and readable
+                     and all(isinstance(line.get("tool_names"), list) for line in wire)
+                     and not surface_mismatches(wire, expected))
+    final = wire[-1] if wire else {}
+    status, finish_reason = final.get("http_status"), final.get("finish_reason")
+    final_observed = (not bad_lines and readable and type(status) is int and 200 <= status < 300
+                      and isinstance(finish_reason, str) and bool(finish_reason)
+                      and final.get("finish_reason_note") is None
+                      and final.get("duration_ms") is not None and final.get("duration_note") is None)
+    return {
+        "exempted": (driver_family == "loop" and spawn_passed and surface_exact and final_observed
+                     and harness_failure is None and not breaches),
+        "spawn_check_passed": spawn_passed,
+        "spawn_check_path": str(spawn_path.relative_to(config.run_dir)),
+        "wire_surface_exact": surface_exact,
+        "wire_requests": len(wire),
+        "expected_wire_surface": expected,
+        "final_response_observed": final_observed,
+        "final_response": {"seq": final.get("seq"), "http_status": status, "finish_reason": finish_reason},
+    }
+
+
 def zero_trace_cells(results: list[dict], dry_run: bool) -> list[str]:
     """Cells where every invocation recorded zero trace records: BROKEN instruments.
 
@@ -796,13 +842,15 @@ def zero_trace_cells(results: list[dict], dry_run: bool) -> list[str]:
     totals: dict[str, int] = {}
     for meta in results:
         totals[meta["cell"]] = totals.get(meta["cell"], 0) + meta["trace_records"]
-    # S16 explicitly records an observed call-free final message as a consumer
-    # outcome. Instrument errors and breaches must not receive this exemption.
-    observed_empty_finals = {m["cell"] for m in results
-                             if (m.get("consumer_limit") or {}).get("cause") == "null_final_content"
-                             and not m.get("harness_failure") and not m.get("breaches")}
+    # Positive evidence establishes cell liveness, but cannot lift any sibling's
+    # row-level harness failure: run_one evaluates each null final independently.
+    exempt_cells = {m["cell"] for m in results
+                    if m.get("driver_family") == "loop"
+                    and (m.get("consumer_limit") or {}).get("cause") == "null_final_content"
+                    and (m.get("zero_trace_liveness") or {}).get("exempted") is True
+                    and not m.get("harness_failure") and not m.get("breaches")}
     return sorted(cell for cell, total in totals.items()
-                  if total == 0 and cell not in observed_empty_finals)
+                  if total == 0 and cell not in exempt_cells)
 
 
 def write_cell_void(run_dir: Path, cell_name: str, reason: str) -> None:
@@ -1504,16 +1552,15 @@ def run(config: RunConfig) -> RunResult:
     dead = zero_trace_cells(results, config.dry_run)
     failures += len(dead)
     for cell_name in dead:
-        reason = ("every invocation in this cell recorded zero trace records: the instrument "
-                  "never ran. BROKEN, never an abstention or a clean run.")
+        reason = ("every invocation in this cell recorded zero trace records without sufficient "
+                  "row-local liveness evidence. BROKEN, never an abstention or a clean run.")
         write_cell_void(config.run_dir, cell_name, reason)
         for meta in results:
             if meta["cell"] != cell_name:
                 continue
+            meta["cell_void"] = reason
             row_path = config.run_dir / meta_relative_path(config, meta) / "meta.json"
-            row = json.loads(row_path.read_text())
-            row["cell_void"] = reason
-            row_path.write_text(json.dumps(row, indent=2) + "\n")
+            row_path.write_text(json.dumps(meta, indent=2) + "\n")
     for cell_name in dead:
         log(f"cell {cell_name}: BROKEN -- zero trace records across every invocation; "
             "an empty run, not a clean one. Do not score it.")
