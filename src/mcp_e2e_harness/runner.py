@@ -458,6 +458,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     started = _utcnow()
     t0 = time.perf_counter()
     harness_failure: str | None = None
+    consumer_limit: dict | None = None
     exit_status = -1
     answer = ""
     stderr_text = ""
@@ -510,13 +511,17 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
                 answer = proc.stdout
             elif turn.answer_path and turn.answer_path.exists():
                 answer = turn.answer_path.read_text()
+            elif turn.answer_from != "stdout":
+                harness_failure = "answer file missing -- the consumer output could not be read"
             if exit_status != 0:
                 harness_failure = f"runner exited {exit_status}: {stderr_text[-800:]}"
-            elif not answer.strip():
-                # A crashed invocation or an empty answer must never be readable as a
-                # consumer that chose not to call anything -- an errored scan must not
-                # look like one that found nothing.
-                harness_failure = "empty answer with exit 0 -- harness failure, NOT a consumer result"
+            elif not answer and harness_failure is None:
+                consumer_limit = {
+                    "cause": "null_final_content",
+                    "detail": "consumer completed with an empty answer",
+                    "reasoning_tail_json": None,
+                    "reasoning_tail_matches_tools": None,
+                }
         except subprocess.TimeoutExpired as exc:
             harness_failure = f"timeout after {config.timeout_s}s -- harness failure, NOT a consumer result"
             partial = exc.stderr
@@ -531,12 +536,36 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
                 recorder.stop()
             if secrets_file is not None:
                 secrets_file.unlink(missing_ok=True)
+        for transcript_path in driver.transcript_paths(dest):
+            assert_clean(transcript_path.read_text(errors="replace"), scan, str(transcript_path))
         _write_scanned(dest / "runner-stderr.txt", stderr_text, scan)
         _write_scanned(dest / "answer.txt", answer, scan)
         if turn.answer_from != "stdout":
             # The driver's stdout is its event stream (not the answer): keep it -- it
             # is where codex reports MCP startup failures and web-tool events.
             _write_scanned(dest / "runner-stdout.txt", stdout_text, scan)
+
+    # The driver family's own reading of the invocation's artifacts (the loop
+    # driver: served providers per request against the pin, usage and cost sums,
+    # loop mechanics, the consumer's fail-fast breach). Any breach voids the cell.
+    family_record: dict | None = None
+    breaches: list[str] = []
+    spend_usd: float | None = None
+    if not config.dry_run:
+        extra = driver.after_turn(turn, dest, cell, dest / "api-surface.jsonl", cell_name)
+        if extra is not None:
+            family_record = extra.get("record")
+            breaches = list(extra.get("breaches") or [])
+            spend_usd = extra.get("cost_usd")
+            consumer_limit = extra.get("consumer_limit") or consumer_limit
+            if breaches:
+                harness_failure = breaches[0]
+            # S13/S16 consumer outcomes use a nonzero exit status deliberately.
+            # Lift that provisional failure before checking the instruments; a
+            # breach or any unrelated failure remains an instrument failure.
+            if (consumer_limit and not breaches and harness_failure
+                    and harness_failure.startswith("runner exited")):
+                harness_failure = None
 
     # Effect-level web-activity scan over the driver's EVENT streams (never answer
     # content -- an answer saying "I cannot search the web" must not read as web
@@ -614,29 +643,6 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     # fetch) lands mid-invocation, never at build_turn time (50-drivers.md Residual 2).
     environment_state = driver.environment_state(turn) if not config.dry_run else None
 
-    # The driver family's own reading of the invocation's artifacts (the loop
-    # driver: served providers per request against the pin, usage and cost sums,
-    # loop mechanics, the consumer's fail-fast breach). Any breach voids the cell.
-    family_record: dict | None = None
-    breaches: list[str] = []
-    spend_usd: float | None = None
-    consumer_limit: dict | None = None
-    if not config.dry_run:
-        extra = driver.after_turn(turn, dest, cell, dest / "api-surface.jsonl", cell_name)
-        if extra is not None:
-            family_record = extra.get("record")
-            breaches = list(extra.get("breaches") or [])
-            spend_usd = extra.get("cost_usd")
-            consumer_limit = extra.get("consumer_limit") or None
-            if breaches and harness_failure is None:
-                harness_failure = breaches[0]
-            # S13: an answerless turn the consumer caused (endpoint context limit
-            # after its own tool calls; the scaffold's step cap) is a consumer
-            # outcome. The instrument captured everything, so the two answerless
-            # harness-failure shapes are lifted; a breach or any other failure stays.
-            if consumer_limit and harness_failure and (
-                    harness_failure.startswith("runner exited") or harness_failure.startswith("empty answer")):
-                harness_failure = None
     if api_surface and api_surface.get("wire_surface_mismatches"):
         breaches.append("wire tools array differs from the cell's surface (S7 exact)")
     if api_surface and api_surface.get("disallowed_builtins_on_wire"):
@@ -692,8 +698,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "duration_s": duration,
         "exit_status": exit_status,
         "harness_failure": harness_failure,
-        # S13: the answerless consumer outcome, when the turn ended because the
-        # consumer ran into a limit ({"cause": "context_length" | "step_cap", ...}).
+        # S13/S16: answerless consumer outcomes, including limits and null final content.
         # answer.txt is empty for such a row; this is where it says so.
         "consumer_limit": consumer_limit,
         "trace_records": len(records),
@@ -702,7 +707,8 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "answer_chars": len(answer),
         # A digest of answer.txt (sha256, first 16 hex): the per-cell distinct-answer
         # count in run-manifest.json is computed from these (WO-3).
-        "answer_sha256_16": hashlib.sha256(answer.encode("utf-8", "replace")).hexdigest()[:16],
+        "answer_sha256_16": (hashlib.sha256(answer.encode("utf-8", "replace")).hexdigest()[:16]
+                             if answer else None),
         # measurements.<name>: one entry per record the declaration's selector matched,
         # each carrying the method name and content hash beside the values (null
         # values with a note when the reference pointer does not resolve to a string).
@@ -782,15 +788,21 @@ def answers_across_prompts(by_prompt: dict[str, dict]) -> dict:
 def zero_trace_cells(results: list[dict], dry_run: bool) -> list[str]:
     """Cells where every invocation recorded zero trace records: BROKEN instruments.
 
-    A single-prompt cell with an empty trace is the canonical case; it is never an
-    abstention, a pass, or a vacuous result (Layer-1 instrument liveness).
+    An empty trace normally fails Layer-1 liveness. S16 exempts an observed null
+    final message with no instrument failure: that is an answerless consumer outcome.
     """
     if dry_run:
         return []
     totals: dict[str, int] = {}
     for meta in results:
         totals[meta["cell"]] = totals.get(meta["cell"], 0) + meta["trace_records"]
-    return sorted(cell for cell, total in totals.items() if total == 0)
+    # S16 explicitly records an observed call-free final message as a consumer
+    # outcome. Instrument errors and breaches must not receive this exemption.
+    observed_empty_finals = {m["cell"] for m in results
+                             if (m.get("consumer_limit") or {}).get("cause") == "null_final_content"
+                             and not m.get("harness_failure") and not m.get("breaches")}
+    return sorted(cell for cell, total in totals.items()
+                  if total == 0 and cell not in observed_empty_finals)
 
 
 def write_cell_void(run_dir: Path, cell_name: str, reason: str) -> None:
@@ -1455,7 +1467,9 @@ def run(config: RunConfig) -> RunResult:
                     limit_label = (meta_relative_path(config, meta).as_posix() if config.repeats is not None
                                    else f"{cell_name}/{entry['id']}")
                     consumer_limits[limit_label] = meta["consumer_limit"]["cause"]
-                    flag = (f"  CONSUMER LIMIT ({meta['consumer_limit']['cause']}): no answer -- "
+                    outcome_label = ("CONSUMER OUTCOME" if meta["consumer_limit"]["cause"] == "null_final_content"
+                                     else "CONSUMER LIMIT")
+                    flag = (f"  {outcome_label} ({meta['consumer_limit']['cause']}): no answer -- "
                             "a consumer outcome, not a harness failure (S13)")
                 family = meta.get(driver.family) if driver.family != "product" else None
                 loop_note = ""

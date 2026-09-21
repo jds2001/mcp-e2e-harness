@@ -184,6 +184,10 @@ class Driver(ABC):
         "cost_usd": float}. Any breach voids the cell. None when nothing to add."""
         return None
 
+    def transcript_paths(self, dest: Path) -> list[Path]:  # noqa: ARG002
+        """Consumer-written transcript artifacts the runner must secret-scan."""
+        return []
+
     def environment_state(self, turn: TurnSpec) -> dict | None:
         """Vendor-pushed state that entered THIS invocation's environment at run time,
         outside anything the harness configured -- e.g. a CLI's own plugin-sync fetch

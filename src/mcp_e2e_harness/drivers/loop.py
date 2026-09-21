@@ -180,7 +180,8 @@ class LoopDriver(Driver):
             "result_path": str(ctx.dest / f"loop-result-{suffix}.json"),
             "mcp_config": str(ctx.mcp_config_path) if mode == "turn" else None,
             "session_mode": session_mode,
-            "session_path": str(ctx.dest / f"loop-session-{session_id}.json") if session_id else None,
+            "session_path": (str(ctx.dest / f"loop-session-{session_id or 'single'}.json")
+                             if mode == "turn" else None),
             "request_timeout_s": 600.0,
             "server_order": [ctx.server_name, *ctx.extra_server_names],
         }
@@ -497,6 +498,9 @@ class LoopDriver(Driver):
         (dest / "probe.json").write_text(text)
         (dest / "runner-stderr.txt").write_text(stderr_text)
         return record
+
+    def transcript_paths(self, dest: Path) -> list[Path]:
+        return sorted(dest.glob("loop-session-*.json"))
 
     # ------------------------------------------------- per-invocation digest
 

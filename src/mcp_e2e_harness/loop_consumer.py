@@ -16,10 +16,10 @@ The prompt arrives on stdin; the final assistant text is stdout and nothing else
 progress and diagnostics go to stderr; the structured outcome lands in the
 ``result_path`` the turn file names. Exit codes: 0 answer produced; 2 harness/IO
 failure; 3 instrument breach (served-provider mismatch, strict-routing refusal,
-surface drift between session turns); 4 a consumer limit (ruling S13): the turn ended
+surface drift between session turns); 4 an answerless consumer outcome (S13/S16): the turn ended
 without an answer because the consumer's own tool calls grew a request past the served
 endpoint's context length and the endpoint refused it, or because the scaffold's step
-cap ended the loop -- a consumer outcome, not a harness failure, recorded under
+cap ended the loop, or the final message had no content -- recorded under
 ``consumer_limit`` in the result file.
 
 Modes: ``turn`` runs the tool loop against the MCP servers in the harness-written
@@ -29,8 +29,8 @@ probe tool -- and judges the reply (requirement 9). Sessions (crowding pre-turn 
 scored turn) share one conversation through a session file the ``open`` turn writes
 and the ``resume`` turn continues.
 
-The consumer reads full responses, as any consumer does; what reaches the artifacts
-is the recorder's business (10-harness.md, recording contract), not this file's.
+The consumer records its conversation in the row's transcript. The separate wire
+recorder still records only its content-free allowlist (10-harness.md).
 """
 from __future__ import annotations
 
@@ -428,6 +428,62 @@ def assistant_message(message: dict) -> dict:
     return out
 
 
+def reasoning_tail_marks(message: dict, tools: list[dict]) -> dict:
+    """S16's content-free observations of the final message's reasoning suffix.
+
+    Prefer reasoning_details text chunks; fall back to the plain reasoning carrier.
+    Scan backwards to find the balanced outer object, ignoring braces in strings.
+    JSON parsing, not shape alone, determines whether that suffix is an object.
+    """
+    chunks = [part["text"] for part in (message.get("reasoning_details") or [])
+              if isinstance(part, dict) and isinstance(part.get("text"), str)]
+    text = "".join(chunks) or message.get("reasoning")
+    marks = {"reasoning_tail_json": None, "reasoning_tail_matches_tools": None}
+    if not isinstance(text, str) or not text.strip():
+        return marks
+    text = text.strip()
+    marks["reasoning_tail_json"] = False
+    if not text.endswith("}"):
+        return marks
+    depth, in_string = 0, False
+    for index in range(len(text) - 1, -1, -1):
+        char = text[index]
+        if char == '"':
+            preceding = index - 1
+            while preceding >= 0 and text[preceding] == "\\":
+                preceding -= 1
+            if (index - preceding - 1) % 2 == 0:
+                in_string = not in_string
+        elif not in_string:
+            if char == "}":
+                depth += 1
+            elif char == "{":
+                depth -= 1
+                if depth == 0:
+                    try:
+                        tail = json.loads(text[index:], parse_constant=_invalid_json_constant)
+                    except (ValueError, RecursionError):
+                        return marks
+                    marks["reasoning_tail_json"] = True
+                    marks["reasoning_tail_matches_tools"] = sorted(
+                        tool["function"]["name"] for tool in tools
+                        if set(tail) <= set(tool["function"]["parameters"].get("properties") or {}))
+                    return marks
+    return marks
+
+
+def _invalid_json_constant(value: str):
+    raise ValueError(f"not a JSON constant: {value}")
+
+
+def transcript_message(message: dict) -> dict:
+    """Keep reasoning text in the transcript without changing request construction."""
+    out = assistant_message(message)
+    if "reasoning" in message:
+        out["reasoning"] = message["reasoning"]
+    return out
+
+
 def check_served_provider(config: TurnConfig, response: dict, seq: int) -> str | None:
     served = response.get("provider")
     served = served if isinstance(served, str) and served else None
@@ -454,12 +510,29 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
             raise LoopError(f"session file {config.session_path!r} missing: cannot resume a conversation "
                             "that was never opened, so the cell would not be crowded")
         session = json.loads(Path(config.session_path).read_text())
-        messages = list(session["messages"])
+        transcript = list(session["messages"])
+        # Plain reasoning is recorded but was never part of @1's echo policy.
+        messages = [assistant_message(m) if m.get("role") == "assistant" else m
+                    for m in transcript]
     else:
         messages = [{"role": "system", "content": scaffold.system_prompt}]
+        transcript = list(messages)
+    user_message = {"role": "user", "content": prompt}
+    messages.append(user_message)
+    transcript.append(user_message)
+    by_wire: dict[str, OfferedTool] = {}
+    transcript_path = Path(config.session_path or Path(config.result_path).with_name("loop-session-single.json"))
 
-    clients = open_servers(Path(config.mcp_config), log) if config.mcp_config else {}
+    def save_transcript() -> None:
+        transcript_path.write_text(json.dumps(
+            {"messages": transcript, "offered_tools": sorted(by_wire),
+             "scaffold": scaffold.full_name}, indent=1) + "\n")
+
+    # Save before I/O and incrementally thereafter, including failed/interrupted rows.
+    save_transcript()
+    clients: dict[str, StdioMCPClient] = {}
     try:
+        clients = open_servers(Path(config.mcp_config), log) if config.mcp_config else {}
         offered = offer_tools(clients)
         by_wire = {t.wire_name: t for t in offered}
         tools = [t.definition for t in offered]
@@ -468,7 +541,7 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
             raise LoopBreach("surface_drift",
                              f"the resumed turn offers {sorted(by_wire)} but the session was opened with "
                              f"{sorted(session.get('offered_tools') or [])}")
-        messages.append({"role": "user", "content": prompt})
+        save_transcript()
         answer: str | None = None
         for step in range(1, scaffold.step_cap + 1):
             result["steps"] = step
@@ -484,20 +557,36 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
             key = served or "(absent)"
             result["served_providers"][key] = result["served_providers"].get(key, 0) + 1
             choices = response.get("choices") or []
-            message = (choices[0].get("message") if choices and isinstance(choices[0], dict) else None) or {}
+            message = (choices[0].get("message")
+                       if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None)
+            if not isinstance(message, dict):
+                raise LoopError("completion response has no assistant message")
             calls = message.get("tool_calls") or []
             log(f"step {step}: provider={served} tool_calls={len(calls)} "
                 f"tokens={usage.prompt_tokens}/{usage.completion_tokens} cost=${usage.cost_usd:.6f}")
             messages.append(assistant_message(message))
+            transcript.append(transcript_message(message))
+            save_transcript()
             if not calls:
                 content = message.get("content")
-                answer = content if isinstance(content, str) else json.dumps(content)
+                if isinstance(content, str) and content:
+                    answer = content
+                else:
+                    result["consumer_limit"] = {
+                        "cause": "null_final_content",
+                        "detail": "final message has no non-empty string content and no tool calls",
+                        **reasoning_tail_marks(message, tools),
+                    }
+                    log("CONSUMER OUTCOME (null_final_content): no answer produced")
                 break
             for call in calls:
                 result["tool_calls"] += 1
                 client.turn_tool_calls += 1
-                messages.append({"role": "tool", "tool_call_id": call.get("id"),
-                                 "content": _execute_call(call, by_wire, log)})
+                tool_message = {"role": "tool", "tool_call_id": call.get("id"),
+                                "content": _execute_call(call, by_wire, log)}
+                messages.append(tool_message)
+                transcript.append(tool_message)
+                save_transcript()
         if answer is None and result["consumer_limit"] is None:
             result["step_cap_hit"] = True
             result["consumer_limit"] = {
@@ -511,10 +600,7 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
             c.close()
         result["usage"] = usage.as_dict()
         result["retries"] = client.retries
-        if config.session_mode in ("open", "resume") and config.session_path:
-            Path(config.session_path).write_text(json.dumps(
-                {"messages": messages, "offered_tools": sorted(by_wire) if 'by_wire' in locals() else [],
-                 "scaffold": scaffold.full_name}, indent=1) + "\n")
+        save_transcript()
     return (answer or ""), result
 
 

@@ -100,13 +100,17 @@ def main() -> int:
     if "leak" in prompt.lower():
         answer_lines.append(f"the secret is {os.environ.get('TEST_SECRET_VAR', '')}")
     answer = "\n".join(answer_lines)
+    forced_answer = os.environ.get("FAKE_ANSWER_TEXT")
+    if forced_answer is not None:
+        answer = forced_answer
     # Drivers whose answer travels by file (codex -o): stdout stays an event stream.
     answer_file = os.environ.get("FAKE_ANSWER_FILE")
     if answer_file:
-        Path(answer_file).write_text(answer + "\n")
+        Path(answer_file).write_text(answer + "\n" if answer else "")
         print("event: turn complete (answer written to file)")
     else:
-        print(answer)
+        if answer:
+            print(answer)
     return 0
 
 
