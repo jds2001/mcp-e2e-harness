@@ -75,6 +75,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         groups={g.strip() for g in args.groups.split(",")} if args.groups else None,
         prompts={p.strip() for p in args.prompts.split(",")} if args.prompts else None,
         dry_run=args.dry_run,
+        repeats=args.repeats,
         timeout_s=args.timeout,
         budget_usd=args.budget_usd,
         probe_cache_dir=Path(args.loop_probe_cache) if args.loop_probe_cache else None,
@@ -156,6 +157,16 @@ def cmd_probe_loop(args: argparse.Namespace) -> int:
     return 0 if all(r["verdict"] == "pass" for r in records.values()) else 1
 
 
+def positive_integer(value: str) -> int:
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be an integer >= 1") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be an integer >= 1")
+    return number
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mcp-e2e", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -175,6 +186,8 @@ def main(argv: list[str] | None = None) -> int:
                             "cell even if the cell's groups exclude it, marked outside_cell_groups")
     p_run.add_argument("--dry-run", action="store_true",
                        help="validate manifest, cells, and argv without calling any model or server")
+    p_run.add_argument("--repeats", type=positive_integer, default=None,
+                       help="repeat the selected grid N times (integer >= 1)")
     p_run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S,
                        help=f"per-invocation timeout in seconds (default {DEFAULT_TIMEOUT_S})")
     p_run.add_argument("--budget-usd", type=float, default=None,

@@ -1,6 +1,6 @@
 """The declarative Layer-1 check language -- documentation/30-checks.md, evaluated here.
 
-Per run, per check, exactly one of four outcomes. The distinctions exist because
+Per cell and per run, per check, exactly one of four outcomes. The distinctions exist because
 collapsing them is how instruments lie:
 
 * ``pass``    -- the selector matched at least one record and the assertion held on all.
@@ -325,7 +325,7 @@ def lint_check(check: dict) -> str | None:
 
 # ---------------------------------------------------------------- evaluation
 
-def evaluate_checks(checks: list[dict],
+def _evaluate_checks(checks: list[dict],
                     records_by_invocation: dict[str, list[dict]]) -> list[dict]:
     """One outcome per check over the whole run, with per-record failure references.
 
@@ -371,5 +371,37 @@ def evaluate_checks(checks: list[dict],
             entry.update(outcome="pass", matched=matched, failures=[])
         else:
             entry.update(outcome="vacuous", matched=0, failures=[])
+        report.append(entry)
+    return report
+
+
+def evaluate_checks(checks: list[dict], records_by_invocation: dict[str, list[dict]],
+                    *, cells: list[str] | None = None) -> list[dict]:
+    """Per-cell outcomes and the worst roll-up: error > fail > pass > vacuous.
+
+    Invocation labels are cell/group/prompt[/rNN]. Explicit cells include selected
+    cells with no attempted rows, so even those receive an outcome for every check.
+    """
+    grouped: dict[str, dict[str, list[dict]]] = {cell: {} for cell in cells or []}
+    for label, records in records_by_invocation.items():
+        grouped.setdefault(label.split("/")[0], {})[label] = records
+    per_cell = {cell: _evaluate_checks(checks, rows) for cell, rows in grouped.items()}
+    report = []
+    priority = {"vacuous": 0, "pass": 1, "fail": 2, "error": 3}
+    for index, empty in enumerate(_evaluate_checks(checks, {})):
+        outcomes = {cell: entries[index] for cell, entries in per_cell.items()}
+        worst = max(outcomes.values(), key=lambda e: priority[e["outcome"]], default=empty)
+        entry = {**empty, "outcome": worst["outcome"],
+                 "matched": sum(e["matched"] for e in outcomes.values()),
+                 "failures": [], "cells": outcomes}
+        if "error" in worst:
+            entry["error"] = worst["error"]
+        for outcome in outcomes.values():
+            for failure in outcome["failures"]:
+                parts = failure["invocation"].split("/")
+                failure.update(cell=parts[0], prompt_id=parts[2] if len(parts) > 2 else None)
+                if len(parts) > 3:
+                    failure["repetition"] = int(parts[3][1:])
+                entry["failures"].append(failure)
         report.append(entry)
     return report

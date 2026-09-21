@@ -56,6 +56,7 @@ class _State:
         self.meta_lock = threading.Lock()
         self.pending_calls: dict[object, dict] = {}   # request id -> {tool, args, started...}
         self.pending_lists: set = set()               # request ids of tools/list
+        self.server_spawn: dict | None = None
         self.index = 0
         self.blocked: list[dict] = []
         self.malformed_driver_lines = 0
@@ -71,6 +72,7 @@ class _State:
         """
         with self.meta_lock:
             self.meta_file.write_text(json.dumps({
+                **({"server_spawn": self.server_spawn} if self.server_spawn else {}),
                 "blocked_calls": self.blocked,
                 "malformed_driver_lines": self.malformed_driver_lines,
                 "malformed_server_lines": self.malformed_server_lines,
@@ -202,6 +204,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trace-file", required=True)
     parser.add_argument("--tools-file", required=True)
     parser.add_argument("--meta-file", required=True)
+    parser.add_argument("--record-server-spawn", action="store_true")
     parser.add_argument("--allow-tools", default=None,
                         help="comma-separated tool allowlist for list-valued tool_surface cells")
     parser.add_argument("--secrets-file", default=None,
@@ -249,6 +252,8 @@ def main(argv: list[str] | None = None) -> int:
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=sys.stderr.fileno(),
         env=env, cwd=config.get("cwd") or None,
     )
+    if args.record_server_spawn:
+        state.server_spawn = {"pid": proc.pid, "started_at": datetime.now(timezone.utc).isoformat()}
     state.write_meta(None, "running")
 
     def _on_signal(signum, frame):  # noqa: ARG001

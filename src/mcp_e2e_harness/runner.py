@@ -73,6 +73,7 @@ class RunConfig:
     groups: set[str] | None = None
     prompts: set[str] | None = None
     dry_run: bool = False
+    repeats: int | None = None
     timeout_s: int = DEFAULT_TIMEOUT_S
     drivers: dict[str, Driver] = field(default_factory=lambda: dict(DRIVERS))
     # Run-level spend cap in USD (50-drivers.md loop #6): summed actual usage.cost
@@ -173,10 +174,41 @@ def cell_id_of(cell_name: str, cell: dict, driver: Driver | None = None) -> str:
     surface = cell["tool_surface"]
     surface_tag = "full" if surface == "full" else "surface:" + "+".join(surface)
     parts = [cell["driver"], cell["model"], cell["context"], surface_tag]
+    identity = {
+        "knobs": cell.get("knobs") or {},
+        "setup": cell.get("setup") or [],
+        "env": recorded_cell_env(cell),
+        "selection": {"groups": sorted(cell.get("groups") or []),
+                      "prompts": sorted(cell.get("prompts") or []),
+                      "variant": cell.get("variant") or "base"},
+    }
+    for name, value in identity.items():
+        canonical = json.dumps(value, sort_keys=True, separators=(",", ":"))
+        parts.append(f"{name}:" + hashlib.sha256(canonical.encode()).hexdigest()[:16])
     # Identity components the driver's contract adds (10-harness.md "Cells": the loop
     # driver adds scaffold version and provider pin).
     parts += driver.cell_identity(cell) if driver is not None else []
     return "/".join(parts)
+
+
+def recorded_cell_env(cell: dict) -> dict:
+    """Keep non-secret values and only the destination key of secret entries."""
+    return {key: None if is_secret_ref(value) else value
+            for key, value in (cell.get("env") or {}).items()}
+
+
+def row_relative_path(config: RunConfig, cell: str, group: str, prompt: str,
+                      repetition: int | None) -> Path:
+    path = Path(cell) / group / prompt
+    if repetition is not None:
+        width = max(2, len(str(config.repeats)))
+        path /= f"r{repetition:0{width}d}"
+    return path
+
+
+def meta_relative_path(config: RunConfig, meta: dict) -> Path:
+    return row_relative_path(config, meta["cell"], meta["group"],
+                             meta["prompt_id"], meta.get("repetition"))
 
 
 def scan_set_for(config: RunConfig, driver: Driver) -> list[str]:
@@ -367,11 +399,13 @@ def _crowding_preturn(driver: Driver, ctx_base: dict, procedure: crowding.Crowdi
 
 
 def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str],
-            advertised_tools: list[str] | None = None) -> dict:
+            advertised_tools: list[str] | None = None,
+            repetition: int | None = None) -> dict:
     manifest = config.manifest
     entry, cell_name, cell = planned.entry, planned.cell_name, planned.cell
     driver = config.drivers[cell["driver"]]
-    dest = config.run_dir / cell_name / entry["group"] / entry["id"]
+    dest = config.run_dir / row_relative_path(
+        config, cell_name, entry["group"], entry["id"], repetition)
     dest.mkdir(parents=True, exist_ok=True)
     scan = scan_set_for(config, driver)
 
@@ -392,6 +426,8 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
 
     entries = {manifest.server["name"]: _proxy_entry(server_config, dest, "", cell,
                                                      secrets_file=secrets_file)}
+    if repetition is not None:
+        entries[manifest.server["name"]]["args"].append("--record-server-spawn")
     extra_names: tuple[str, ...] = ()
     if procedure is not None:
         entries[procedure.server_name] = _distractor_entry(procedure, dest)
@@ -628,6 +664,8 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "group": entry["group"],
         "cell": cell_name,
         "cell_id": cell_id_of(cell_name, cell, driver),
+        "repetition": repetition,
+        "env": recorded_cell_env(cell),
         "driver": {"id": cell["driver"], "cli_version": driver_versions.get(cell["driver"])},
         # S11 marks: the family on every row ("product" | "loop"); loop rows add the
         # scaffold with hash, the pin (slug verified, quantization asserted) or
@@ -713,18 +751,24 @@ def answers_by_prompt(results: list[dict], cell_name: str) -> dict[str, dict]:
     """The distinct-answer count per prompt id within one cell (loop requirement 11, WO-3/WO-4).
 
     Requirement 11 concerns repeats of *one* prompt, so the count is keyed by prompt id:
-    ``{"C1": {"invocations": n, "distinct": d, "digests": {sha16: count}}, ...}``. A
-    digest map, so a reader sees which rows repeat without opening answer files. The
+    ``invocations`` counts attempts; ``answered`` counts non-empty answers. The
+    digest map shows which answered rows repeat without opening answer files. The
     across-prompts total lives beside it under its own clearly labeled key, never here.
     """
-    digests: dict[str, dict[str, int]] = {}
+    answers: dict[str, dict] = {}
     for meta in results:
-        if meta["cell"] != cell_name or meta.get("answer_sha256_16") is None:
+        if meta["cell"] != cell_name:
             continue
-        per_prompt = digests.setdefault(meta["prompt_id"], {})
-        per_prompt[meta["answer_sha256_16"]] = per_prompt.get(meta["answer_sha256_16"], 0) + 1
-    return {pid: {"invocations": sum(d.values()), "distinct": len(d), "digests": d}
-            for pid, d in digests.items()}
+        summary = answers.setdefault(meta["prompt_id"], {
+            "invocations": 0, "answered": 0, "distinct": 0, "digests": {}})
+        summary["invocations"] += 1
+        if not meta.get("answer_chars"):
+            continue
+        summary["answered"] += 1
+        digest = meta["answer_sha256_16"]
+        summary["digests"][digest] = summary["digests"].get(digest, 0) + 1
+        summary["distinct"] = len(summary["digests"])
+    return answers
 
 
 def answers_across_prompts(by_prompt: dict[str, dict]) -> dict:
@@ -1167,6 +1211,8 @@ def probe_loop_cells(manifest: Manifest, cells: list[str], out: Path, *, timeout
 
 
 def preflight(config: RunConfig) -> None:
+    if config.repeats is not None and (type(config.repeats) is not int or config.repeats < 1):
+        raise HarnessError("--repeats must be an integer >= 1")
     manifest = config.manifest
     transport = manifest.server["transport"]
     if transport["type"] != "stdio":
@@ -1210,9 +1256,8 @@ def preflight(config: RunConfig) -> None:
                     "that runs the harness; it appears in no artifact.")
         # Resolve every $secret now, so a missing export fails once, loudly, before
         # anything is spent -- not as N consumer failures that are really one unset var.
-        resolve_env_map(transport.get("env") or {}, where="server.transport.env")
         for cell_name in config.cells:
-            resolve_env_map(manifest.cells[cell_name].get("env") or {},
+            resolve_env_map(_server_env_spec(manifest, manifest.cells[cell_name]),
                             where=f"cells.{cell_name}.env")
 
 
@@ -1237,16 +1282,17 @@ def run(config: RunConfig) -> RunResult:
     driver_ids = {manifest.cells[c]["driver"] for c in config.cells}
     driver_versions = ({d: None for d in driver_ids} if config.dry_run else
                        {d: config.drivers[d].cli_version() for d in sorted(driver_ids)})
+    repeat_count = config.repeats or 1
     invocations_per_cell: dict[str, int] = {}
     for item in planned:
-        invocations_per_cell[item.cell_name] = invocations_per_cell.get(item.cell_name, 0) + 1
+        invocations_per_cell[item.cell_name] = invocations_per_cell.get(item.cell_name, 0) + repeat_count
 
     # S9: the run directory is named up front, before anything can go wrong, so an
     # operator who suspects trouble knows where the artifacts are.
     log = config.log
     log(f"manifest   : {manifest.sha256[:16]}  ({manifest.path})")
     log(f"run dir    : {config.run_dir}")
-    log(f"invocations: {len(planned)}   (one fresh process each -- never batched)"
+    log(f"invocations: {len(planned) * repeat_count}   (one fresh process each -- never batched)"
         + ("   [DRY RUN]" if config.dry_run else ""))
     for driver_id in sorted(driver_ids):
         log(f"driver     : {driver_id}  [{driver_versions[driver_id] or 'not recorded: dry run'}]")
@@ -1307,129 +1353,139 @@ def run(config: RunConfig) -> RunResult:
     def over_run_cap() -> bool:
         return config.budget_usd is not None and spend_run >= config.budget_usd
 
-    for cell_name in config.cells:
-        cell_planned = by_cell.get(cell_name, [])
-        if not cell_planned:
-            continue
-        cell = manifest.cells[cell_name]
-        driver = config.drivers[cell["driver"]]
-        if run_stopped:
-            log(f"cell {cell_name}: not started -- the run-level budget cap stopped the run")
-            continue
-        advertised: list[str] | None = None
-        # S8 (from DR-1): fail-fast instrument liveness at spawn. The SUT is spawned
-        # once per cell under the invocation's own conditions (neutral cwd, cell env)
-        # BEFORE any model turn; a dead or toolless server breaks the cell here,
-        # with zero prompts spent, and the breach is surfaced live.
-        if not config.dry_run:
-            check = spawn_liveness_check(manifest, cell, config.run_dir / cell_name,
-                                         scan, config.tmp_base)
-            if check["ok"]:
-                advertised = list(check["advertised_tools"])
-                log(f"cell {cell_name}: spawn check live "
-                    f"({len(check['advertised_tools'])} tool(s) advertised); "
-                    f"{len(cell_planned)} prompt(s)")
-            else:
-                reason = (f"instrument liveness failed at spawn (S8): {check['reason']}. "
-                          "No model turn was spent. See spawn-check.json (stderr tail "
-                          "included) beside CELL-VOID.json.")
-                write_cell_void(config.run_dir, cell_name, reason)
-                voided[cell_name] = reason
-                failures += 1
-                log(f"cell {cell_name}: BROKEN at spawn -- {check['reason']}")
-                log(f"  {len(cell_planned)} prompt(s) skipped without spending model turns; "
-                    f"evidence: {config.run_dir / cell_name / 'spawn-check.json'}")
+    advertised_by_cell: dict[str, list[str]] = {}
+    capped_cells: set[str] = set()
+    for pass_number in range(1, repeat_count + 1):
+        for cell_name in config.cells:
+            cell_planned = by_cell.get(cell_name, [])
+            if not cell_planned or cell_name in voided or cell_name in capped_cells:
                 continue
-            # The driver family's own cell gate, after the spawn check and before any
-            # model turn: the loop driver's calibration probe (S12; loop #9), cached
-            # per (model, provider, scaffold, driver version). A non-pass BREAKS the
-            # cell with zero prompts spent.
-            gate = driver.cell_gate(cell_name, cell, config.run_dir / cell_name / "loop-probe",
-                                    cache_dir, log, config.timeout_s, scan)
-            if gate is not None:
-                cell_gates[cell_name] = gate["record"]
-                gate_cost = float(gate.get("cost_usd") or 0.0)
-                spend_run += gate_cost
-                spend_cell[cell_name] = spend_cell.get(cell_name, 0.0) + gate_cost
-                record = gate["record"]
-                log(f"cell {cell_name}: calibration probe -> {record.get('verdict')}"
-                    + ("  (cached)" if record.get("cached") else "")
-                    + (f"  served={record.get('served_provider')}" if record.get("served_provider") else "")
-                    + (f"  ${gate_cost:.6f}" if gate_cost else ""))
-                if not gate["ok"]:
-                    reason = f"instrument-broken before any model turn: {gate['reason']}"
+            cell = manifest.cells[cell_name]
+            driver = config.drivers[cell["driver"]]
+            if run_stopped:
+                log(f"cell {cell_name}: not started -- the run-level budget cap stopped the run")
+                continue
+            advertised = advertised_by_cell.get(cell_name)
+            # S8 (from DR-1): fail-fast instrument liveness at spawn. The SUT is spawned
+            # once per cell under the invocation's own conditions (neutral cwd, cell env)
+            # BEFORE any model turn; a dead or toolless server breaks the cell here,
+            # with zero prompts spent, and the breach is surfaced live.
+            if not config.dry_run and pass_number == 1:
+                check = spawn_liveness_check(manifest, cell, config.run_dir / cell_name,
+                                             scan, config.tmp_base)
+                if check["ok"]:
+                    advertised = list(check["advertised_tools"])
+                    advertised_by_cell[cell_name] = advertised
+                    log(f"cell {cell_name}: spawn check live "
+                        f"({len(check['advertised_tools'])} tool(s) advertised); "
+                        f"{len(cell_planned)} prompt(s)")
+                else:
+                    reason = (f"instrument liveness failed at spawn (S8): {check['reason']}. "
+                              "No model turn was spent. See spawn-check.json (stderr tail "
+                              "included) beside CELL-VOID.json.")
                     write_cell_void(config.run_dir, cell_name, reason)
                     voided[cell_name] = reason
                     failures += 1
-                    log(f"cell {cell_name}: BROKEN -- {gate['reason']}")
-                    log(f"  {len(cell_planned)} prompt(s) skipped without spending model turns.")
+                    log(f"cell {cell_name}: BROKEN at spawn -- {check['reason']}")
+                    log(f"  {len(cell_planned)} prompt(s) skipped without spending model turns; "
+                        f"evidence: {config.run_dir / cell_name / 'spawn-check.json'}")
                     continue
-        cell_cap = cell.get("budget_usd")
-        for index, item in enumerate(cell_planned):
-            entry = item.entry
-            remaining = len(cell_planned) - index
-            if over_run_cap():
-                stop = {"scope": "run", "cap_usd": config.budget_usd, "spent_usd": round(spend_run, 8),
-                        "at": f"{cell_name}/{entry['id']}", "skipped_in_cell": remaining}
-                budget_stops.append(stop)
-                run_stopped = True
-                log(f"BUDGET STOP: run spend ${spend_run:.6f} reached the run cap "
-                    f"${config.budget_usd:.2f} before {cell_name}/{entry['id']}; the run stops "
-                    f"cleanly, completed cells stand, {remaining} prompt(s) in this cell not run.")
-                break
-            if cell_cap is not None and spend_cell.get(cell_name, 0.0) >= cell_cap:
-                stop = {"scope": "cell", "cell": cell_name, "cap_usd": cell_cap,
-                        "spent_usd": round(spend_cell[cell_name], 8),
-                        "at": f"{cell_name}/{entry['id']}", "skipped_in_cell": remaining}
-                budget_stops.append(stop)
-                log(f"BUDGET STOP: cell {cell_name} spend ${spend_cell[cell_name]:.6f} reached its "
-                    f"cap ${cell_cap:.2f} before {entry['id']}; {remaining} prompt(s) in this cell "
-                    "not run. Completed invocations stand.")
-                break
-            log(f"  -> {cell_name}/{entry['id']}"
-                + ("  [outside cell groups]" if item.outside_cell_groups else ""))
-            meta = run_one(config, item, driver_versions, advertised_tools=advertised)
-            results.append(meta)
-            if meta.get("spend_usd") is not None:
-                spend_run += float(meta["spend_usd"])
-                spend_cell[cell_name] = spend_cell.get(cell_name, 0.0) + float(meta["spend_usd"])
-            flag = ""
-            if meta["harness_failure"]:
-                failures += 1
-                flag = f"  HARNESS FAILURE: {meta['harness_failure'][:90]}"
-            elif meta.get("consumer_limit"):
-                consumer_limits[f"{cell_name}/{entry['id']}"] = meta["consumer_limit"]["cause"]
-                flag = (f"  CONSUMER LIMIT ({meta['consumer_limit']['cause']}): no answer -- "
-                        "a consumer outcome, not a harness failure (S13)")
-            family = meta.get(driver.family) if driver.family != "product" else None
-            loop_note = ""
-            if family:
-                served = ",".join(f"{k}x{v}" for k, v in (family.get("served_providers") or {}).items())
-                loop_note = f"  served={served or 'none'} ${float(meta.get('spend_usd') or 0):.6f}"
-            log(f"     {entry['id']:6s} {meta['duration_s']:6.1f}s  "
-                f"{meta['trace_records']:>3} trace record(s)  "
-                f"{meta['answer_chars']:>6} chars{loop_note}{flag}")
-            # Attribution breach (a disallowed builtin on the wire, web-tool
-            # activity in the driver's event streams, a wire surface that differs
-            # from the cell's, a served-provider mismatch, a strict-routing
-            # refusal): the row is not tool-attributable and the CELL is BROKEN --
-            # refusal is hard, not best-effort (50-drivers.md #5; the measured
-            # failure class includes a web tool fabricating a fetch result
-            # presented as retrieved).
-            breach = list(meta.get("web_activity_suspected") or [])
-            breach += list(meta.get("breaches") or [])
-            if breach:
-                reason = (f"attribution breach in {entry['id']}: {breach[0][:300]} -- "
-                          "the environment the configuration claims does not hold; no row of "
-                          "this cell is tool-attributable.")
-                write_cell_void(config.run_dir, cell_name, reason)
-                voided[cell_name] = reason
-                remaining = len(cell_planned) - index - 1
-                log(f"cell {cell_name}: BROKEN -- {reason}")
-                if remaining:
-                    log(f"  {remaining} remaining prompt(s) skipped without spending "
-                        "model turns.")
-                break
+                # The driver family's own cell gate, after the spawn check and before any
+                # model turn: the loop driver's calibration probe (S12; loop #9), cached
+                # per (model, provider, scaffold, driver version). A non-pass BREAKS the
+                # cell with zero prompts spent.
+                gate = driver.cell_gate(cell_name, cell, config.run_dir / cell_name / "loop-probe",
+                                        cache_dir, log, config.timeout_s, scan)
+                if gate is not None:
+                    cell_gates[cell_name] = gate["record"]
+                    gate_cost = float(gate.get("cost_usd") or 0.0)
+                    spend_run += gate_cost
+                    spend_cell[cell_name] = spend_cell.get(cell_name, 0.0) + gate_cost
+                    record = gate["record"]
+                    log(f"cell {cell_name}: calibration probe -> {record.get('verdict')}"
+                        + ("  (cached)" if record.get("cached") else "")
+                        + (f"  served={record.get('served_provider')}" if record.get("served_provider") else "")
+                        + (f"  ${gate_cost:.6f}" if gate_cost else ""))
+                    if not gate["ok"]:
+                        reason = f"instrument-broken before any model turn: {gate['reason']}"
+                        write_cell_void(config.run_dir, cell_name, reason)
+                        voided[cell_name] = reason
+                        failures += 1
+                        log(f"cell {cell_name}: BROKEN -- {gate['reason']}")
+                        log(f"  {len(cell_planned)} prompt(s) skipped without spending model turns.")
+                        continue
+            cell_cap = cell.get("budget_usd")
+            for index, item in enumerate(cell_planned):
+                entry = item.entry
+                remaining = len(cell_planned) * (repeat_count - pass_number + 1) - index
+                if over_run_cap():
+                    stop = {"scope": "run", "cap_usd": config.budget_usd, "spent_usd": round(spend_run, 8),
+                            "at": f"{cell_name}/{entry['id']}", "skipped_in_cell": remaining}
+                    budget_stops.append(stop)
+                    run_stopped = True
+                    log(f"BUDGET STOP: run spend ${spend_run:.6f} reached the run cap "
+                        f"${config.budget_usd:.2f} before {cell_name}/{entry['id']}; the run stops "
+                        f"cleanly, completed cells stand, {remaining} prompt(s) in this cell not run.")
+                    break
+                if cell_cap is not None and spend_cell.get(cell_name, 0.0) >= cell_cap:
+                    stop = {"scope": "cell", "cell": cell_name, "cap_usd": cell_cap,
+                            "spent_usd": round(spend_cell[cell_name], 8),
+                            "at": f"{cell_name}/{entry['id']}", "skipped_in_cell": remaining}
+                    budget_stops.append(stop)
+                    capped_cells.add(cell_name)
+                    log(f"BUDGET STOP: cell {cell_name} spend ${spend_cell[cell_name]:.6f} reached its "
+                        f"cap ${cell_cap:.2f} before {entry['id']}; {remaining} prompt(s) in this cell "
+                        "not run. Completed invocations stand.")
+                    break
+                repeat_label = (f" r{pass_number:0{max(2, len(str(repeat_count)))}d}/{repeat_count}"
+                                if config.repeats is not None else "")
+                log(f"  -> {cell_name}/{entry['id']}{repeat_label}"
+                    + ("  [outside cell groups]" if item.outside_cell_groups else ""))
+                meta = run_one(config, item, driver_versions, advertised_tools=advertised,
+                               repetition=pass_number if config.repeats is not None else None)
+                results.append(meta)
+                if meta.get("spend_usd") is not None:
+                    spend_run += float(meta["spend_usd"])
+                    spend_cell[cell_name] = spend_cell.get(cell_name, 0.0) + float(meta["spend_usd"])
+                flag = ""
+                if meta["harness_failure"]:
+                    failures += 1
+                    flag = f"  HARNESS FAILURE: {meta['harness_failure'][:90]}"
+                elif meta.get("consumer_limit"):
+                    limit_label = (meta_relative_path(config, meta).as_posix() if config.repeats is not None
+                                   else f"{cell_name}/{entry['id']}")
+                    consumer_limits[limit_label] = meta["consumer_limit"]["cause"]
+                    flag = (f"  CONSUMER LIMIT ({meta['consumer_limit']['cause']}): no answer -- "
+                            "a consumer outcome, not a harness failure (S13)")
+                family = meta.get(driver.family) if driver.family != "product" else None
+                loop_note = ""
+                if family:
+                    served = ",".join(f"{k}x{v}" for k, v in (family.get("served_providers") or {}).items())
+                    loop_note = f"  served={served or 'none'} ${float(meta.get('spend_usd') or 0):.6f}"
+                log(f"     {entry['id']:6s}{repeat_label} {meta['duration_s']:6.1f}s  "
+                    f"{meta['trace_records']:>3} trace record(s)  "
+                    f"{meta['answer_chars']:>6} chars{loop_note}{flag}")
+                # Attribution breach (a disallowed builtin on the wire, web-tool
+                # activity in the driver's event streams, a wire surface that differs
+                # from the cell's, a served-provider mismatch, a strict-routing
+                # refusal): the row is not tool-attributable and the CELL is BROKEN --
+                # refusal is hard, not best-effort (50-drivers.md #5; the measured
+                # failure class includes a web tool fabricating a fetch result
+                # presented as retrieved).
+                breach = list(meta.get("web_activity_suspected") or [])
+                breach += list(meta.get("breaches") or [])
+                if breach:
+                    reason = (f"attribution breach in {entry['id']}: {breach[0][:300]} -- "
+                              "the environment the configuration claims does not hold; no row of "
+                              "this cell is tool-attributable.")
+                    write_cell_void(config.run_dir, cell_name, reason)
+                    voided[cell_name] = reason
+                    remaining = len(cell_planned) * (repeat_count - pass_number + 1) - index - 1
+                    log(f"cell {cell_name}: BROKEN -- {reason}")
+                    if remaining:
+                        log(f"  {remaining} remaining prompt(s) skipped without spending "
+                            "model turns.")
+                    break
 
     dead = zero_trace_cells(results, config.dry_run)
     failures += len(dead)
@@ -1440,7 +1496,7 @@ def run(config: RunConfig) -> RunResult:
         for meta in results:
             if meta["cell"] != cell_name:
                 continue
-            row_path = config.run_dir / meta["cell"] / meta["group"] / meta["prompt_id"] / "meta.json"
+            row_path = config.run_dir / meta_relative_path(config, meta) / "meta.json"
             row = json.loads(row_path.read_text())
             row["cell_void"] = reason
             row_path.write_text(json.dumps(row, indent=2) + "\n")
@@ -1485,10 +1541,10 @@ def run(config: RunConfig) -> RunResult:
     if manifest.checks and not config.dry_run:
         records_by_invocation = {}
         for meta in results:
-            trace_path = config.run_dir / meta["cell"] / meta["group"] / meta["prompt_id"] / "trace.jsonl"
+            trace_path = config.run_dir / meta_relative_path(config, meta) / "trace.jsonl"
             records, _ = _read_trace(trace_path)
-            records_by_invocation[f"{meta['cell']}/{meta['group']}/{meta['prompt_id']}"] = records
-        checks_report = checks_mod.evaluate_checks(manifest.checks, records_by_invocation)
+            records_by_invocation[meta_relative_path(config, meta).as_posix()] = records
+        checks_report = checks_mod.evaluate_checks(manifest.checks, records_by_invocation, cells=config.cells)
         failures += sum(1 for c in checks_report if c["outcome"] == "error")
         # Every row a loop cell emits carries its reproducibility mark (loop #4):
         # failure references name an invocation, so the mark rides on each one.
@@ -1497,7 +1553,7 @@ def run(config: RunConfig) -> RunResult:
                 cell_of_row = str(failure.get("invocation", "")).split("/")[0]
                 if cell_of_row in cell_marks:
                     failure["driver_family"] = cell_marks[cell_of_row]["driver_family"]
-                    failure["reproducibility"] = cell_marks[cell_of_row]["reproducibility"]
+                    failure["reproducibility"] = cell_marks[cell_of_row].get("reproducibility")
         (config.run_dir / "checks-report.json").write_text(json.dumps({
             "cells": {c: {"driver": manifest.cells[c]["driver"], **cell_marks.get(c, {})}
                       for c in config.cells},
@@ -1540,7 +1596,7 @@ def run(config: RunConfig) -> RunResult:
         "harness_version": __version__,
         "manifest": {"path": str(manifest.path), "sha256": manifest.sha256},
         "generated_utc": _utcnow(),
-        "selection": {"cells": config.cells,
+        "selection": {"cells": config.cells, "repeats": config.repeats,
                       "groups": sorted(config.groups) if config.groups else None,
                       "prompts": sorted(config.prompts) if config.prompts else None},
         "driver_versions": driver_versions,

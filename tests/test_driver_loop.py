@@ -866,20 +866,20 @@ def test_distinct_answer_count_is_keyed_by_prompt(tmp_path, fake_openrouter):
 
 
 def test_distinct_answers_two_invocations_of_one_prompt_and_one_of_another():
-    # The runner plans one invocation per (cell, prompt) within a run -- repeats of one
-    # prompt come from separate runs -- so the aggregation is exercised directly on
-    # the shape run_one records: one meta per invocation.
+    # The shape run_one records: one meta per attempted invocation, even answerless.
     from mcp_e2e_harness.runner import answers_across_prompts, answers_by_prompt
 
-    results = [{"cell": "c", "prompt_id": "C1", "answer_sha256_16": "aaaa"},
-               {"cell": "c", "prompt_id": "C1", "answer_sha256_16": "bbbb"},
-               {"cell": "c", "prompt_id": "C2", "answer_sha256_16": "aaaa"},  # matches a C1 answer: not a repeat
-               {"cell": "other", "prompt_id": "C1", "answer_sha256_16": "aaaa"},
-               {"cell": "c", "prompt_id": "C3", "answer_sha256_16": None}]  # answerless row: not counted
+    results = [{"cell": "c", "prompt_id": "C1", "answer_sha256_16": "aaaa", "answer_chars": 4},
+               {"cell": "c", "prompt_id": "C1", "answer_sha256_16": "bbbb", "answer_chars": 4},
+               # Same answer, different prompt.
+               {"cell": "c", "prompt_id": "C2", "answer_sha256_16": "aaaa", "answer_chars": 4},
+               {"cell": "other", "prompt_id": "C1", "answer_sha256_16": "aaaa", "answer_chars": 4},
+               {"cell": "c", "prompt_id": "C3", "answer_sha256_16": None, "answer_chars": 0}]  # attempted, unanswered
     by_prompt = answers_by_prompt(results, "c")
-    assert by_prompt == {"C1": {"invocations": 2, "distinct": 2, "digests": {"aaaa": 1, "bbbb": 1}},
-                         "C2": {"invocations": 1, "distinct": 1, "digests": {"aaaa": 1}}}
-    assert answers_across_prompts(by_prompt) == {"invocations": 3, "distinct": 2}
+    assert by_prompt == {"C1": {"invocations": 2, "answered": 2, "distinct": 2, "digests": {"aaaa": 1, "bbbb": 1}},
+                         "C2": {"invocations": 1, "answered": 1, "distinct": 1, "digests": {"aaaa": 1}},
+                         "C3": {"invocations": 1, "answered": 0, "distinct": 0, "digests": {}}}
+    assert answers_across_prompts(by_prompt) == {"invocations": 4, "distinct": 2}
 
 
 def test_product_cells_carry_the_distinct_answer_count(tmp_path, fake_drivers):
