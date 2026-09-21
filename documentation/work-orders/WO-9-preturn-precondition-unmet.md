@@ -36,3 +36,7 @@ What a product-driver crowded cell does in the same situation today (a pre-turn 
 ## Out of scope
 
 Replacing anything other than a precondition-unmet invocation. Any retry or re-prompt inside the pre-turn (S16 corollary). Any change to `neutral-file-triage@2` or `loop-scaffold@1`.
+
+## Status
+
+**Accepted 2026-09-21**, both parts, from `runs/2026-09-21-wo9/` with the artifacts read first and the report second; commit c289b74. Record in `10-harness.md` → Layer 2. The product-driver report back exposed that the precondition is inferred from an exit code and never checked from state; ruled S19, ordered as WO-10, with three small conformance items from these artifacts as its part B.
