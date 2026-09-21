@@ -1,6 +1,6 @@
 # WO-9 — a pre-turn that ends in a consumer outcome: say so in the row, count it apart, and do not truncate the reason
 
-**Issued:** 2026-09-21, spec session. **For:** the implementation session. **Spec authority:** `10-harness.md` → Layer 2, ruling S17; `10-harness.md` → run mechanics, operator legibility (S9). Files win on conflict. Small.
+**Issued:** 2026-09-21, spec session. **For:** the implementation session. **Spec authority:** `10-harness.md` → Layer 2, rulings S17 and S18; `10-harness.md` → run mechanics, operator legibility (S9). Files win on conflict. Small.
 
 ## Background
 
@@ -20,10 +20,19 @@ In a live uscode-mcp run (`uscode-mcp/runs/20263721183723-loop-complete/loop-flo
 
 Fake-upstream runs, crowded loop cell, `--repeats 2`: (a) repetition 1's pre-turn ends on null content after one tool call, repetition 2 completes — row r01 with the block and the cause in its failure text, no `loop-turn` request for the scored prompt on its wire (the wire line count says so), r02 answered; the manifest's new key, `failures` not incremented by r01, the asked/reached counts; the captured terminal output with the full line. (b) Both repetitions' pre-turns end that way — the cell BROKEN for zero trace records, `CELL-VOID.json`, and the manifest. (c) A pre-turn that dies without a consumer outcome — a harness failure counted in `failures`, as before. A before/after of (a) against e2ae37b.
 
+## Part B — replace the lost invocation (added 2026-09-21, before work began; ruling S18)
+
+8. When an invocation ends precondition unmet, run the slot again as a whole fresh invocation, up to three replacements (four attempts), default 3, settable on the command line (suggested `--precondition-retries N`; 0 disables). Not in the manifest hash or `cell_id`.
+9. **Only** precondition-unmet invocations are replaced. A scored turn ending in `null_final_content`, `step_cap`, or `context_length` is kept as the slot's result; any other harness failure is not replaced. Unit tests for each of these three refusals.
+10. Every attempt kept on disk under its own path (layout yours; say what it is, and show that a run without any unmet invocation has the same layout as today), every unmet attempt in the manifest under deliverable 3's key with slot and attempt number, an exhausted slot recorded as exhausted and the run continuing. Counts per (cell, prompt): asked, reached, attempts.
+11. Pre-run estimate shows expected and worst-case spend; replacements draw on the cell and run budgets, and a budget stop ends replacement. Each replacement announced on the terminal with the cause.
+
+**Acceptance, part B — fake upstream, crowded loop cell, `--repeats 2`:** (d) r01's first attempt unmet, second reaches the scored turn: both attempts on disk, the slot's row is the second, manifest counts `asked 2, reached 2, attempts 3`, terminal output. (e) a slot whose four attempts are all unmet: exhausted, run continues, other slot scored. (f) a scored turn ending on null content with retries enabled: one attempt, not replaced. (g) a budget that runs out mid-replacement: stops, recorded under `budget.stops`. (h) `--precondition-retries 0` reproduces part A's run (a).
+
 ## Report back
 
 What a product-driver crowded cell does in the same situation today (a pre-turn with empty output, or a non-zero exit), from an artifact and not from the code's description: S17 was read from a loop row only, and the spec session does not know whether product drivers can report a consumer outcome from a pre-turn at all.
 
 ## Out of scope
 
-Replacing lost repetitions (Q11, with the maintainer). Any retry or re-prompt inside the pre-turn (S16 corollary). Any change to `neutral-file-triage@2` or `loop-scaffold@1`.
+Replacing anything other than a precondition-unmet invocation. Any retry or re-prompt inside the pre-turn (S16 corollary). Any change to `neutral-file-triage@2` or `loop-scaffold@1`.
