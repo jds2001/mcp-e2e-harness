@@ -1,6 +1,8 @@
 # Writing an e2e suite for your MCP server
 
-You are authoring a **suite**: the server-specific half of an end-to-end verification setup whose other half is the generic `mcp-e2e` harness. This document is the contract. It is a self-contained distillation of the harness spec (`documentation/` in the harness repo, which is normative if the two ever disagree; distilled 2026-08-31).
+You are authoring a **suite**: the server-specific half of an end-to-end verification setup whose other half is the generic harness. The harness's repository is `model-e2e-harness`; the command it installs is `mcp-e2e`. This document is the contract, written so that you can author a manifest from it alone — if you had to open another harness file to write a cell, that is a defect in this document, and the harness spec session wants to hear about it. The harness spec (`documentation/` in the harness repo) is normative if the two ever disagree. First distilled 2026-08-31; last revised 2026-09-21, against harness commit 1950fbb.
+
+You run the harness from outside its repo. Call the entry point in the harness's own environment by absolute path (`/abs/path/to/model-e2e-harness/.venv/bin/mcp-e2e validate --manifest /abs/path/to/your/manifest.json`). The first outside suite runs it that way from a neutral working directory; the consumer's own working directory is the harness's business and is always neutral, whatever yours is.
 
 A suite is: one manifest file, the measurements grounding it, and the scored findings from runs. It lives in your server's repo, not the harness repo.
 
@@ -27,7 +29,7 @@ If your server fronts a live upstream, pin each grounding against a stated snaps
 
 ## The manifest
 
-One JSON file. Top level: `suite`, `server` (required); `fixtures`, `rubrics`, `checks` (optional); `cells`, `prompts` (required).
+One JSON file. Top level: `suite`, `server` (required); `fixtures`, `rubrics`, `checks`, `measurements` (optional); `cells`, `prompts` (required).
 
 ```json
 {
@@ -58,7 +60,16 @@ One JSON file. Top level: `suite`, `server` (required); `fixtures`, `rubrics`, `
       "driver": "codex", "model": "gpt-5.6-luna", "knobs": {"reasoning_effort": "medium"},
       "role": "cross-vendor-floor", "context": "fresh",
       "tool_surface": ["search_thing", "get_thing"], "merge_gating": false, "groups": ["A"],
-      "notes": "gating is this suite's own choice (S11); a cross-vendor cell never substitutes for a primary-vendor gate"
+      "notes": "gating is this suite's own choice; a cross-vendor cell never substitutes for a primary-vendor gate"
+    },
+    "loop-floor": {
+      "driver": "loop", "endpoint": "openrouter", "scaffold": "loop-scaffold@1",
+      "model": "openai/gpt-oss-120b", "provider": "deepinfra/bf16",
+      "knobs": {"reasoning": {"effort": "low"}, "max_tokens": 8192},
+      "role": "floor", "context": "fresh",
+      "tool_surface": ["search_thing", "get_thing"], "merge_gating": false, "groups": ["A"],
+      "budget_usd": 0.50,
+      "notes": "non-gating until one run has been scored"
     }
   },
   "checks": [
@@ -79,13 +90,34 @@ One JSON file. Top level: `suite`, `server` (required); `fixtures`, `rubrics`, `
 }
 ```
 
+### Cell fields
+
+Every cell, whatever its driver. An unknown key is a load error, so write only these (plus the loop fields further down, for loop cells, and `_`-prefixed commentary).
+
+| field | required | what |
+|---|---|---|
+| `driver` | yes | `claude-code`, `codex`, or `loop` |
+| `model` | yes | model id, verbatim in the driver's vocabulary |
+| `knobs` | yes | object of driver-native settings, verbatim; the harness never defaults or translates them |
+| `role` | yes | `floor`, `ceiling`, `capability-floor`, `isolation`, `cross-vendor-*`, or a name of your own |
+| `context` | yes | `fresh` or `crowded` |
+| `crowding` | when `context` is `crowded` | `{procedure, collision_review}` — see the crowded-cells note below |
+| `tool_surface` | yes | `"full"` or an explicit list of your server's tool names |
+| `merge_gating` | yes | boolean: does a failure here block your merge |
+| `groups` | yes | the prompt groups that run in this cell |
+| `prompts` | no | a list of prompt ids that **narrows** `groups` to exactly those prompts — how you restrict an experiment cell to one prompt |
+| `variant` | no | the prompt variant this cell uses (`single_step`); default is the base `prompt` |
+| `setup` | no | ordered list of `{tool, args}` calls the harness makes directly against your server before the prompt, never via a model turn; what ran and what it returned is recorded in the row's `meta.json` |
+| `env` | no | extra environment variables for **your server's process in this cell only**, added to `server.transport.env` (on a key both set, the cell's value wins — specified 2026-09-21 and not yet verified in the implementation, so until it is, give an arm's variable to every arm and leave it out of `server`), with the same `{"$secret": …}` handling; part of the cell's identity |
+| `notes` | no | free text: what the cell isolates, a pointer to its preregistration |
+
 Notes on the parts that bite:
 
 - **Your server command runs from a neutral working directory — never your repo.** Attribution requires it, so cwd-dependent launchers die at spawn: `uv run <script>` resolves its project from cwd and fails with exit 2 from anywhere else. Use `uv run --project /abs/path/to/your-repo <script>`, an absolute path to an installed entry point, or `python -m your_server` against an absolute-path environment. The first real suite lost a run to exactly this.
 - **Optional fields may be explicit `null`** — null and absent are equivalent everywhere except `pass`/`fail`, where null means "scored by the named `rubric`" and `rubric` becomes required.
 - **Secrets**: values written as `{"$secret": "VAR"}` resolve from the harness environment at launch and never touch an artifact. Name your sensitive keys in `secret_keys` — a literal value under a named key is a load error. Trace/transcript/meta are scanned for resolved secret material; a hit halts the run.
 - **`tool_surface`**: `"full"` or an explicit tool-name list. Attribution-dependent conclusions ("that citation is absent from the trace, therefore fabricated") are valid **only** in list-surface cells, where trace scope equals tool surface — the harness enforces the list at the MCP proxy and verifies it on the model-API wire.
-- **Fresh by default**: every invocation gets a fresh neutral working directory and a fresh server process. State you want present must arrive explicitly, via `setup` (an ordered list of `{tool, args}` calls the harness makes directly against your server before the prompt — never via a model turn) or `env`. There is no warm-by-accident.
+- **Fresh by default**: every invocation gets a fresh neutral working directory and a fresh server process. State you want present must arrive explicitly, via the cell's `setup` or the cell's `env` (both in the field table above). There is no warm-by-accident.
 - **Crowded cells**: you *select* a harness-owned crowding procedure by pinned name and version; you never author crowding content (an internals-aware author would be writing part of the instrument they are scored against). `collision_review` is your dated attestation that the procedure's content is disjoint from your server's domain; if it collides, select a different harness procedure. Currently pinned: `neutral-file-triage@2` (a mundane office notes-triage task — collides with note-keeping, filing, and office-facilities domains).
 - **Knobs are driver-native and verbatim**: write `thinking` for Claude drivers, another vendor's terms for its cells; never translate between vendors' scales. A cross-vendor cell never silently substitutes for a gating cell of your primary vendor.
 
@@ -94,14 +126,43 @@ Notes on the parts that bite:
 A codex cell is three manifest fields — `"driver": "codex"`, a codex model id, and codex-native knobs (`reasoning_effort`, not `thinking`) — as the skeleton's `cross-vendor-floor` shows. Everything attribution-critical is the driver's job, not yours, and none of it is configurable from the manifest: isolated per-invocation `CODEX_HOME`, web-tool removal via the harness's recording provider, the read-only sandbox, plugin-sync suppression, and per-invocation wire verification all happen automatically, and a violation breaks the cell rather than tainting your data. What you do need to know:
 
 - **Credentials**: the harness environment must carry an OpenAI **API key** for the recording provider to forward with; the driver refuses ChatGPT-login state for attribution cells. Driver credentials live in the harness environment, not in your manifest — the manifest's `{"$secret": …}` mechanism is for *your server's* keys, and it works identically under codex (the harness injects them past codex's env sanitization; you author nothing extra).
-- **Role and gating**: give codex cells a `cross-vendor-*` role; whether they gate is your suite's decision like any cell (S11 in the harness spec). The one hard rule is substitution, not gating: a cross-vendor cell never stands in for a gating cell of your primary vendor.
+- **Role and gating**: give codex cells a `cross-vendor-*` role; whether they gate is your suite's decision like any cell. The one hard rule is substitution, not gating: a cross-vendor cell never stands in for a gating cell of your primary vendor.
 - **Version sensitivity**: the codex driver contract is verified against a pinned codex-cli version (see the harness repo's `50-drivers.md`); on a different local version the harness re-verifies before attribution cells run — expect that, don't fight it.
 
 ### Real floor models with the `loop` driver (OpenRouter)
 
-The `loop` driver (`50-drivers.md`) puts the harness's own minimal agent loop in front of any OpenRouter model, so the floor role can be a cheap open-weight model rather than whatever the product CLIs expose. It measures **server × model under the harness scaffold**, a different thing from the product-driver cells, and never pools with them (S11). Selecting models is your call; these are the constraints and a dated starting roster.
+The `loop` driver puts the harness's own minimal agent loop in front of any OpenRouter model, so the floor role can be a cheap open-weight model rather than whatever the product CLIs expose. It measures **server × model under the harness's pinned scaffold**, a different thing from what the product-driver cells (`claude-code`, `codex`) measure, which is server × shipping product. Rows from the two families never pool and never substitute for each other, in either direction. The OpenRouter credential is `OPENROUTER_API_KEY` in the harness's environment; it never appears in your manifest. Selecting models is your call; below are the fields, the constraints, and a dated starting roster.
 
-**Eligibility is per endpoint, not per model id (S12).** OpenRouter's model-level "supports tools" flag is not enough: on 2026-09-18, 5 of the 24 endpoints serving `openai/gpt-oss-120b` did not advertise tools, and quantization on the rest ranged bf16 to fp4. Read the endpoint listing (`GET /api/v1/models/<id>/endpoints`, free) before pinning, and pin a merge-gating loop cell. A pin candidate must: advertise `tools` on that endpoint; state its quantization, or be the model's first party; show a healthy status; and survive the driver's data-policy preference. The harness's calibration probe then confirms the pair actually calls a tool before any scored turn runs.
+**Loop cell fields.** The common fields in the table above apply unchanged; a loop cell adds or constrains these. The skeleton's `loop-floor` is a complete example.
+
+| field | required | what |
+|---|---|---|
+| `endpoint` | yes | the named deployment; the only value today is `"openrouter"`. Hosts and credentials are harness configuration, never manifest content |
+| `scaffold` | yes | the harness's loop scaffold as `name@version`; the only pinned one is `"loop-scaffold@1"`. It is the system prompt, tool-loop policy, and step cap (24 requests per turn), and it is part of the cell's identity: cells on different scaffold versions never pool |
+| `model` | yes | the OpenRouter model id verbatim (`openai/gpt-oss-120b`), with no routing suffix (`:free` and kin) — routing is expressed in `provider` |
+| `provider` | no | **the pin.** One endpoint `tag` copied verbatim from the endpoint listing described below (`deepinfra/bf16`; some tags have no quantization part, such as `openai`). Present: the driver sends it as the sole allowed provider with fallbacks off, it is part of the cell's identity, and a response served by any other provider breaks the cell. Absent: the cell is unpinned — it runs normally, and every row it produces is marked `reproducibility: unpinned` |
+| `knobs` | yes | OpenRouter request fields verbatim: the unified `reasoning` object (`{"effort": "low"}`), `temperature`, `seed`, `max_tokens`, and so on. A floor-role reasoning model carries its minimum effort, since most cannot switch reasoning off |
+| `data_policy` | no | `"deny"` (the default) or `"allow"`. Under `deny` the driver sends OpenRouter's preference excluding providers that collect prompts. This is a routing preference and a disclosure, not a verified privacy property; the only enforceable instrument is a pin to a provider whose policy you have read |
+| `budget_usd` | no | a spend cap for this cell: reaching it stops this cell (its remaining prompts are skipped, completed rows stand) and the run continues. The run-level cap is the `--budget-usd` flag, and reaching that one stops the run. Either stop is recorded in `run-manifest.json` under `budget.stops` |
+
+What a pin verifies, exactly: a response names its provider and nothing finer, so the **provider part** of the tag is verified on every request, and the **quantization part** is a preference the router enforces on its own say-so. Artifacts say this in so many words (`quantization_asserted`, `pin_slug_verified_against`); your findings should not claim more.
+
+**Eligibility is per endpoint, not per model id.** OpenRouter's model-level "supports tools" flag is not enough: on 2026-09-18, 5 of the 24 endpoints serving `openai/gpt-oss-120b` did not advertise tools, and quantization on the rest ranged bf16 to fp4. So before choosing a pin, read the endpoint listing: `GET https://openrouter.ai/api/v1/models/<model id>/endpoints` (free, no key). Each entry of `data.endpoints` is one candidate, and these are the fields to read (re-checked against the live listing on 2026-09-21):
+
+| listing field | what to do with it |
+|---|---|
+| `tag` | the value you copy verbatim into the cell's `provider` (`akashml/bf16`, `deepinfra/bf16`, `openai`). `provider_name` is the display name (`DeepInfra`) and is what responses report; it is not what the manifest takes |
+| `supported_parameters` | must contain `tools`, and must contain **every top-level key you put in `knobs`** (`reasoning`, `temperature`, `seed`, `max_tokens`) — see the knob rule below |
+| `quantization` | must be stated (`bf16`, `fp8`, …; not `unknown`), unless the endpoint is the model's first party |
+| `status` | `0` is healthy. Anything else is not — on 2026-09-21, 4 of that model's 24 endpoints carried `-2` or `-5` — and is not a pin candidate. `uptime_last_30m` sits beside it |
+| `context_length`, `max_completion_tokens` | the endpoint's own limits; your `max_tokens` has to fit under the second |
+| `pricing.prompt`, `pricing.completion` | dollars per token on this endpoint, which can differ severalfold from the model's list price |
+
+The harness then confirms the choice itself: before any scored turn, a discarded **calibration probe** runs under the cell's exact scaffold, knobs, and pin against a trivial harness-owned tool, and the pair must return one well-formed tool call. A pair that fails is refused for the run before any scored turn is spent. `mcp-e2e probe-loop --manifest …` runs only the probes, for well under a cent, and is the cheap way to check a new roster.
+
+**The knob rule.** Every loop request is sent with OpenRouter's `require_parameters` flag, so a knob the endpoint does not declare is **refused, never silently dropped**. On a pinned cell, a `knobs` key missing from the pinned endpoint's `supported_parameters` fails the calibration probe: the cell is voided for the run before any scored turn, and `run-manifest.json` → `voided_cells.<cell>` names the undeclared parameter. On an unpinned cell the same flag narrows routing to endpoints that declare every knob you sent, and the probe fails the same way if no endpoint does. Measured example: `openai/gpt-5.4-nano` @ `openai` does not declare `temperature`, so that cell was voided with `temperature` in its knobs and ran normally without it (2026-09-18). Without the flag the router dropped the knob and answered as if nothing were wrong, which is why the flag is not optional. One limit: declared is not honored. If a conclusion of yours depends on a knob's *effect* (reasoning effort above the minimum, most likely), check the effect where it is recorded — reasoning-token counts on the wire lines, for effort.
+
+**Gating.** Whether a loop cell gates your merge is your decision, exactly as for any other cell; the harness neither asks loop cells to gate nor forbids it. The one rule is conditional: **if** a loop cell is merge-gating, it must be pinned, because an unpinned cell has no fixed environment to attribute a failure to. Keeping a new loop cell non-gating until one run has been scored is a sound default.
 
 **What the ranking you may have seen means.** OpenRouter's category rankings ("top legal model" and so on) are usage share by tokens, not accuracy; the page is client-rendered and was not machine-readable to the spec session, so the standing is a maintainer report here. Popularity is a good reason to *include* a model in the floor — a floor should be what real consumers use — and no reason to trust its answers; the suite measures that.
 
@@ -109,20 +170,68 @@ The `loop` driver (`50-drivers.md`) puts the harness's own minimal agent loop in
 
 | role | model id | $/M in / out | endpoints (tools) | notes |
 |---|---|---|---|---|
-| floor, open-weight | `openai/gpt-oss-120b` | 0.15 / 0.60 | 24 (19) | the maintainer's pick; **pin** — bf16 endpoints with tools existed at $0.03–0.04 (AkashML, DekaLLM, DeepInfra); reasoning cannot be disabled, use `{"reasoning": {"effort": "low"}}` |
+| floor, open-weight | `openai/gpt-oss-120b` | 0.15 / 0.60 | 24 (19) | the maintainer's pick; **pin** — bf16 endpoints with tools at $0.03–0.04: tags `akashml/bf16`, `dekallm/bf16`, `deepinfra/bf16` (the last is the one the harness's own runs used); reasoning cannot be disabled, use `{"reasoning": {"effort": "low"}}` |
 | floor, second lineage | `deepseek/deepseek-v4-flash` | 0.048 / 0.097 | 16 (16) | fp8 everywhere; a non-OpenAI lineage so the floor is not one family |
 | floor, second lineage (alt) | `z-ai/glm-5.3-flash` | 0.09 / 0.30 | 29 (29) | first party is `z-ai/fp8` at 0.15 / 0.50 |
 | floor, no pin question | `qwen/qwen3.7-flash` | 0.03 / 0.13 | 1 (1) | single first-party endpoint |
-| floor, no pin question | `mistralai/mistral-small-2603` | 0.15 / 0.60 | 3 (3) | first party only, a zero-retention tag exists |
-| capability-floor | `openai/gpt-oss-20b` | 0.03 / 0.13 | 13 (9) | pin; bf16 with tools at DekaLLM/DeepInfra ~0.03 |
-| vendor mid-tier (optional) | `openai/gpt-5.4-nano` | 0.20 / 1.25 | 4 (4) | first party; the cheapest current OpenAI tier. **No `temperature` knob** — the strict pin refuses it (probed 2026-09-18) |
-| vendor mid-tier (optional) | `google/gemini-3.5-flash-lite` | 0.30 / 2.50 | 8 (8) | first party |
+| floor, no pin question | `mistralai/mistral-small-2603` | 0.15 / 0.60 | 3 (3) | first party only, tag `mistral`; a zero-retention tag exists |
+| capability-floor | `openai/gpt-oss-20b` | 0.03 / 0.13 | 13 (9) | pin; probed at `deepinfra/bf16` (~0.03); DekaLLM listed a bf16 endpoint with tools as well |
+| vendor mid-tier (optional) | `openai/gpt-5.4-nano` | 0.20 / 1.25 | 4 (4) | first party, tag `openai`; the cheapest current OpenAI tier. **No `temperature` knob** — the endpoint does not declare it, so the knob rule above voids the cell (probed 2026-09-18) |
+| vendor mid-tier (optional) | `google/gemini-3.5-flash-lite` | 0.30 / 2.50 | 8 (8) | first party, probed at tag `google-ai-studio` |
 | avoid | `meta-llama/llama-4-maverick` | 0.19 / 0.65 | 5 (3) | tools on a minority of endpoints, no reasoning knob |
 | avoid | any `:free` id | 0 | — | rate-limited, and the free tier is where prompt logging concentrates |
 
-Every row above except the `:free` line was probed on 2026-09-18, first by the spec session's script (`openrouter-probe-2026-09-18.md`) and then under the harness's own probe gate (`50-drivers.md` → loop, verification record): all returned a well-formed tool call at the stated pin except `mistralai/mistral-small-2603`, which OpenRouter's shared Mistral pool rate-limited on six attempts that day — unmeasured, not struck; re-probe before relying on it. The loop driver is verified for pinned cells as of 2026-09-18; a pin verifies the provider, and the quantization in a pin tag is a request-side preference the router enforces on its own say-so. **Repeats on a pin may replay one draw** — the driver sends no sampling knobs unless you do, and a pinned endpoint returned four byte-identical answers in ten invocations on 2026-09-18 — so state distinct-answer counts beside invocation counts in any rate claim, and set `temperature` or `seed` in knobs (where the endpoint declares them) if you want a distribution rather than a replay. Set `max_tokens` with the answer you expect in mind: a 4,096 cap cut a 20k-character paste three times in ten, and only the finish reason on the wire line tells you that happened. Start with two or three: the maintainer's pick pinned, one second-lineage floor, and the capability-floor. Grow on a question, never on curiosity (`10-harness.md`, grid grows on need).
+Every row above except the `:free` line was probed on 2026-09-18 under the harness's own calibration probe: all returned a well-formed tool call at the stated pin except `mistralai/mistral-small-2603`, which OpenRouter's shared Mistral pool rate-limited on six attempts that day — unmeasured, not struck; re-probe before relying on it. Start with two or three cells: the maintainer's pick pinned, one second-lineage floor, and the capability-floor. Grow on a question, never on curiosity.
 
-**Cost, so you can set the cap before the first run.** Measured under the loop driver itself (2026-09-18, `50-drivers.md` → loop, loop-specific cost basis): a crowded floor invocation of a two-call prompt at `openai/gpt-oss-120b` @ `deepinfra/bf16` cost $0.002 and a fresh isolation one under $0.001, so a 40-invocation pass (20 prompts × floor + isolation) is about **$0.06 at that pin, $0.25 at the $0.15/M list tier, and a few dollars at the $1/M vendor tier**. The product-driver numbers are roughly ten times higher because the product CLI's system prompt rides on every request. The unbounded terms are reasoning tokens at higher effort and runaway tool loops, which the driver's budget cap and the scaffold's step cap exist for. Set `budget_usd` per cell or the run-level cap, and read the pre-run estimate the runner prints.
+**Repeats on a pin may replay one draw.** The driver sends no sampling knobs unless your `knobs` carry them, and a pinned endpoint can be near-deterministic at its defaults: `deepinfra/bf16` returned four byte-identical answers in ten invocations on 2026-09-18, six distinct answers in all, while the unpinned arm gave ten distinct answers. So an invocation count is not a sample count. State the distinct-answer count beside the invocation count in any rate claim ("0 of 10, 6 distinct"). If you want a distribution and not a replay, set `temperature` or `seed` in `knobs` — subject to the knob rule above, so only where the pinned endpoint declares them — say so in the cell's `notes`, and compare that cell only with cells carrying the same knobs.
+
+**Getting N invocations.** The runner invokes each (cell, prompt) pair **once per run**; there is no repeat flag or manifest field as of harness 1950fbb (whether to add one is an open question with the harness maintainer, not a settled absence). Today, ten invocations of a cell means ten runs of the same manifest with ten run directories: `mcp-e2e run --manifest … --cells my-arm --run-dir runs/e17/my-arm-r01`, then `-r02`, and so on. The manifest hash is identical across them, which is what makes the rows comparable. Nothing aggregates across run directories for you: collect `answer_sha256_16` from each row's `meta.json`, and the number of distinct values is your distinct-answer count. The calibration-probe verdict is cached, so repeats do not re-pay it when they share a cache directory (`--loop-probe-cache`; the default sits beside the run directory).
+
+**Set `max_tokens` with the answer you expect in mind.** A 4,096 cap cut a 20k-character paste three times in ten, and the answer text alone cannot show it. The `finish_reason` on the wire line can: `length` is the cap's cut, `stop` is the model's own ending ("What a loop row records", below, has the file and field).
+
+**Cost, so you can set the cap before the first run.** Measured under the loop driver itself (2026-09-18): a crowded floor invocation of a two-call prompt at `openai/gpt-oss-120b` @ `deepinfra/bf16` cost $0.002 and a fresh isolation one under $0.001, so a 40-invocation pass (20 prompts × floor + isolation) is about **$0.06 at that pin, $0.25 at the $0.15/M list tier, and a few dollars at the $1/M vendor tier**. The product-driver numbers are roughly ten times higher because the product CLI's system prompt rides on every request. The unbounded terms are reasoning tokens at higher effort and runaway tool loops, which the budget caps and the scaffold's step cap exist for. Set `budget_usd` per cell or pass `--budget-usd` for the run, and read the pre-run estimate the runner prints.
+
+### A/B arms: comparing two configurations of your server
+
+An **arm** is a cell. Two arms of one experiment are two cells identical in every field except the one under test — for a server-side comparison, one variable in the cell's `env` — and usually narrowed to the experiment's prompt with the cell's `prompts` list:
+
+```json
+"e17-control": {
+  "driver": "loop", "endpoint": "openrouter", "scaffold": "loop-scaffold@1",
+  "model": "openai/gpt-oss-120b", "provider": "deepinfra/bf16",
+  "knobs": {"reasoning": {"effort": "low"}, "max_tokens": 8192},
+  "role": "isolation", "context": "fresh", "tool_surface": ["get_thing"],
+  "merge_gating": false, "groups": ["C"], "prompts": ["C1"],
+  "env": {"MY_SERVER_FEATURE": "off"},
+  "notes": "E17 control arm; preregistration: <path in your repo>"
+},
+"e17-feature-on": { "…": "identical, except", "env": {"MY_SERVER_FEATURE": "on"} }
+```
+
+- **Identity and the hash.** A cell's `env` is part of the cell's identity: two cells differing only in `env` are different cells and their rows never pool. Separately, the manifest hash is over the file's bytes, so *any* edit — an `env` value, a note — is a new manifest. Put every arm of an experiment in the manifest before the first run, so that all arms run under one hash. Until the harness implements the 2026-09-21 identity ruling, the `cell_id` string in `meta.json` does not reflect `env`; tell arms apart by the cell name (`cell` in `meta.json`, and the row's directory).
+- **Set the variable in every arm**, including the control, so that no arm depends on your server's default and the rows record what each arm ran under.
+- **Naming.** The cell name is the row's directory name and the label in every report, so make it carry the experiment and the arm: `<experiment>-<arm>` (`e17-control`, `e17-feature-on`). It becomes a directory name, so keep to letters, digits, `-` and `_`. Name the arm by what it sets, never by what you hope it shows. Point `notes` at the preregistration.
+- **Arms do not gate.** An experiment arm is `merge_gating: false`; a gate is a statement about your release, an arm is a question.
+- **A check cannot be scoped to cells, by design.** Checks select records by tool and by predicates on the record, never by cell. If one arm's server violates a check on every record, that fail is a true observation of that arm, and hiding it would delete it. Pin the expected per-arm outcome in your preregistration ("arm X fails check Y on every record: the arm's signature, not a finding") — the uscode-mcp suite does exactly this. One caution until the harness catches up: the checks report currently gives one outcome per check for the **whole run**, so a by-design fail in one arm hides whether the other arms passed. Per-cell outcomes are specified (2026-09-21) and ordered; until they land, run each arm as its own run (`--cells e17-control`), which you are doing anyway if you need repeats.
+
+### What a loop row records, and where
+
+A row is one (cell, prompt) invocation; its directory is `<run-dir>/<cell>/<group>/<prompt id>/`. Everything in "Runs" below applies to loop rows; these are the loop-specific readings.
+
+| you want | file | field |
+|---|---|---|
+| why the answer ended (cap cut or the model's own stop) | `api-surface.jsonl`, one line per model request, read in `seq` order | `finish_reason` on each line (`length`, `stop`, `tool_calls`), null with `finish_reason_note` when unreadable. Also `meta.json` → `loop.finish_reason` (the final request) and `loop.finish_reasons` (counts) |
+| which provider served each request | `api-surface.jsonl` | `provider`; rolled up in `meta.json` → `loop.served_providers`, with `loop.provider_mismatches` against the pin |
+| tokens and cost | `api-surface.jsonl` | `usage_prompt_tokens`, `usage_completion_tokens`, `usage_reasoning_tokens`, `usage_cost`; the row total is `meta.json` → `spend_usd` |
+| the answer's digest, for counting distinct answers | `meta.json` | `answer_sha256_16` |
+| the distinct-answer count within one run | `run-manifest.json` | `loop_cells.<cell>.answers` (`invocations`, `distinct`, `digests`), keyed by prompt. Since a run invokes each prompt once, this is 1 of 1 today; across runs, aggregate `answer_sha256_16` yourself |
+| pinned or not | `meta.json` | `reproducibility` (`pinned` or `unpinned`), with `provider_pin` and `quantization_asserted` |
+| a consumer that ran itself out of context or steps | `meta.json` | `consumer_limit` (cause `context_length` or `step_cap`) with `harness_failure: null` — a consumer outcome you score as a failure to answer, never a broken instrument; counted in `run-manifest.json` → `consumer_limits` |
+| a cell that never ran, and why | `run-manifest.json` | `voided_cells.<cell>` (the reason in words); budget stops under `budget.stops` |
+| the calibration probe | `<run-dir>/<cell>/loop-probe/` | `probe.json` |
+| row measurements such as `answer-coverage@1` | `meta.json` | `measurements.<name>`: one entry per matched trace record, with the record's `index` and `tool`, the method name and its hash |
+
+The recorder writes no message content and no headers into `api-surface.jsonl` — names, sizes, and the scalars above only. The answer is `answer.txt`; tool traffic is `trace.jsonl`.
 
 ## Checks (Layer 1) — mechanical trace conformance
 
@@ -134,6 +243,21 @@ Each check reports one of **four** outcomes, and the distinctions are the point:
 - `fail` — assertion failed; offending record indices named.
 - `vacuous` — the selector matched **zero** records. Never folded into pass: it means either a dead rule or a run that never exercised the surface, and both deserve eyes.
 - `error` — the check itself could not run. Never conflated with fail or vacuous: a scan that errors must not look like one that found nothing.
+
+## Row measurements — recorded numbers, never outcomes
+
+Optional top-level `measurements` list. A row measurement is a mechanical value the harness computes across two artifacts of one row — a trace record and the row's answer — and records beside the row. It is never pass or fail; what the number means is your reading. One method exists, `answer-coverage@1`: how much of a reference string from a tool result the answer reproduces verbatim.
+
+```json
+"measurements": [
+  {"name": "answer_coverage", "measure": "answer-coverage@1",
+   "applies_to": {"tool": ["get_thing"]},
+   "reference": "/response/structuredContent/text/content",
+   "floor": 64}
+]
+```
+
+`applies_to` is the checks selector (`tool`, optional `when`). `reference` is an RFC 6901 pointer, relative to the trace record, to the **string** to measure against — point at the payload proper and not at a banner or the whole record. `floor` is the minimum matched-span length in whitespace-normalized characters (default 64). Per matched record the row's `meta.json` gets, under `measurements.<name>`: `reference_chars_raw`, `reference_chars_normalized`, `answer_chars_raw`, `floor`, `spans`, `matched_chars`, `furthest_offset` (the raw reference index one past the furthest-reaching matched span), and `share`; a pointer that does not resolve to a string records a null with a note. The measure sees verbatim reproduction only — a summary answer scores near zero, correctly — so read it on prompts whose expected answer quotes, and read it beside `finish_reason`: a third of the window with `stop` is the model's cut, the whole window with `length` is your `max_tokens`.
 
 ## Scoring (Layer 2) and classifying failures
 
@@ -147,7 +271,7 @@ Score from the artifacts, not from summaries — demand the trace, the before/af
 
 ## Runs
 
-`mcp-e2e validate --manifest …` checks the manifest; `mcp-e2e run --manifest …` executes cells. Per cell/prompt the run directory holds: `trace.jsonl` (every tool call, verbatim), `answer.txt`, `meta.json` (knobs, manifest hash, timing, tool-call list, attribution record, api-surface digest, crowding hash), `available-tools.json` (advertised vs exposed), `api-surface.jsonl` (the actual tool arrays sent to the model), and the checks report.
+`mcp-e2e validate --manifest …` checks the manifest and runs nothing; `mcp-e2e run --manifest … [--run-dir DIR] [--cells a,b] [--groups A,B] [--prompts A1,B2] [--dry-run] [--budget-usd N]` executes the selected (cell × prompt) grid, each pair once. One trap: a prompt id given to `--prompts` runs in **every** selected cell, even a cell whose `groups` exclude it (the row is marked `outside_cell_groups`), so pair it with `--cells` when you mean one arm. At the run root: `run-manifest.json` (the selection, per-cell marks, voided cells, budget stops, the results list) and `checks-report.json`. Per row, in `<run-dir>/<cell>/<group>/<prompt id>/`, the run directory holds: `trace.jsonl` (every tool call, verbatim), `answer.txt`, `meta.json` (knobs, manifest hash, timing, tool-call list, attribution record, api-surface digest, crowding hash), `available-tools.json` (advertised vs exposed), `api-surface.jsonl` (one line per model request: the tool names actually sent, body size, timing — and for loop rows the response scalars listed under "What a loop row records"). `meta.json` also carries `answer_sha256_16`, `harness_failure`, and `consumer_limit`.
 
 While a run is live, the runner reports progress to the terminal and artifacts land per cell as it goes — if anything looks wrong, read before killing: `proxy-meta.json` (did your server die? `server_exit` is the tell), `available-tools.json` (did its tools register?), and the cell's `meta.json` (`trace_records: 0` on a prompt that needs your server means the consumer answered from priors — instrument breach, not data).
 
