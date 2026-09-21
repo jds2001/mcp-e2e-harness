@@ -47,7 +47,7 @@ A map of cell id → cell. Fields:
 | `prompts` | no | explicit prompt-id list, narrowing `groups` |
 | `variant` | no | name of the prompt variant this cell uses (e.g. `single_step`); default is the base `prompt` |
 | `setup` | no | ordered list of `{tool, args}` calls the harness makes directly against the server before the prompt — never via a model turn; what ran and what it returned is recorded in meta. The generic form of the ancestor's cache pre-warm |
-| `env` | no | extra environment for the server process in this cell (same secret handling as `server.env`) |
+| `env` | no | extra environment for the server process in this cell (same secret handling as `server.env`); joins cell identity (`10-harness.md` → Cells, 2026-09-21), so two cells differing only here are different cells — the shape of a server-side A/B arm |
 | `notes` | no | free text: what the cell isolates, and any preregistration for it |
 
 The ancestor's `cache: {mode: cold}` semantics — a fresh, empty state directory per invocation — generalize to: **the harness always provides a fresh neutral working directory and fresh server process per cell invocation**; any state carried in must arrive via `setup` or `env`, explicitly. There is no warm-by-accident.
