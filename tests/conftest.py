@@ -160,3 +160,24 @@ def fake_api_upstream():
     yield f"http://127.0.0.1:{server.server_address[1]}"
     server.shutdown()
     server.server_close()
+
+
+@pytest.fixture()
+def fake_openrouter(monkeypatch):
+    from fake_openrouter import FakeOpenRouter
+    from scenarios.loop_config import TEST_KEY
+
+    fake = FakeOpenRouter()
+    url = fake.start()
+    monkeypatch.setenv("MCP_E2E_OPENROUTER_UPSTREAM", url)
+    monkeypatch.setenv("OPENROUTER_API_KEY", TEST_KEY)
+    yield fake
+    fake.stop()
+
+
+def claude_cell_data() -> dict:
+    # The stock DRIVERS registry serves the CLI; use the real claude-code driver id.
+    # A dry run builds and asserts the argv without executing anything.
+    data = manifest_data()
+    data["cells"]["basic"]["driver"] = "claude-code"
+    return data

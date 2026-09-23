@@ -3,17 +3,9 @@ from __future__ import annotations
 
 import json
 
-from conftest import manifest_data, write_manifest
+from conftest import claude_cell_data, manifest_data, write_manifest
 
 from mcp_e2e_harness.cli import main
-
-
-def claude_cell_data() -> dict:
-    # The stock DRIVERS registry serves the CLI; use the real claude-code driver id.
-    # A dry run builds and asserts the argv without executing anything.
-    data = manifest_data()
-    data["cells"]["basic"]["driver"] = "claude-code"
-    return data
 
 
 def test_validate_ok(tmp_path, capsys):

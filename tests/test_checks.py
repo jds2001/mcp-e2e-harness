@@ -5,6 +5,8 @@ collapsing any pair is how instruments lie.
 """
 from __future__ import annotations
 
+import pytest
+
 from mcp_e2e_harness.checks import evaluate_checks, lint_check, resolve_pointer
 
 
@@ -215,3 +217,45 @@ def test_lint_check_catches_structural_problems_without_records():
                                   "assert": {"matches": {"pointer": "/t", "regex": "("}}})
     assert lint_check({"id": "bad", "applies_to": {"tool": "*"},
                        "assert": {"mystery": []}}) is not None
+
+
+def test_checks_pool_repetitions_and_name_rows():
+    check = {"id": "ok", "applies_to": {"tool": "*"}, "assert": {"present": ["/ok"]}}
+    report = evaluate_checks([check], {
+        "control/A/A1/r01": [{"index": 0, "ok": True}],
+        "control/A/A1/r02": [{"index": 0, "ok": True}],
+        "treatment/A/A1/r01": [{"index": 7}],
+    }, cells=["control", "treatment", "empty"], metadata={
+        "control/A/A1/r01": {"cell": "control", "prompt_id": "A1", "repetition": 1},
+        "control/A/A1/r02": {"cell": "control", "prompt_id": "A1", "repetition": 2},
+        "treatment/A/A1/r01": {"cell": "treatment", "prompt_id": "A1", "repetition": 1},
+    })[0]
+    assert report["outcome"] == "fail" and report["matched"] == 3
+    assert {k: (v["outcome"], v["matched"]) for k, v in report["cells"].items()} == {
+        "control": ("pass", 2), "treatment": ("fail", 1), "empty": ("vacuous", 0)}
+    assert report["failures"] == [{"invocation": "treatment/A/A1/r01", "cell": "treatment",
+                                    "prompt_id": "A1", "repetition": 1, "index": 7,
+                                    "details": ["/ok missing"]}]
+
+
+@pytest.mark.parametrize("records, expected", [
+    ({"a/A/P": [], "b/A/P": []}, "vacuous"),
+    ({"a/A/P": [{"tool": "search", "ok": True}], "b/A/P": []}, "pass"),
+    ({"a/A/P": [{"tool": "search"}], "b/A/P": []}, "fail"),
+])
+def test_check_rollup_order(records, expected):
+    check = {"id": "c", "applies_to": {"tool": "*"}, "assert": {"present": ["/ok"]}}
+    assert evaluate_checks([check], records)[0]["outcome"] == expected
+
+
+def test_cell_errors_win_and_other_cells_are_still_evaluated():
+    check = {"id": "c", "applies_to": {"tool": "search", "when": [
+        {"pointer": "/tool", "matches": "("}]}, "assert": {"present": ["/ok"]}}
+    report = evaluate_checks([check], {"a/A/P": [{"tool": "search"}],
+                                      "b/A/P": [{"tool": "other"}]}, metadata={
+        "a/A/P": {"cell": "a"}, "b/A/P": {"cell": "b"}})[0]
+    assert report["outcome"] == report["cells"]["a"]["outcome"] == "error"
+    assert report["cells"]["b"]["outcome"] == "vacuous"
+    check["assert"] = {"bad": True}
+    report = evaluate_checks([check], {}, cells=["a", "b"])[0]
+    assert all(c["outcome"] == "error" for c in report["cells"].values())

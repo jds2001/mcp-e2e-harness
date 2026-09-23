@@ -1,12 +1,10 @@
-"""WO-12 exhausted upstream refusals; all requests go to a local fake."""
+"""Fake-only upstream refusals scenarios shared by regression tests."""
 import os
-import sys
-from pathlib import Path
 
 from fake_openrouter import FakeOpenRouter
-from test_driver_loop import loop_config, loop_manifest
 
 from mcp_e2e_harness.runner import run
+from scenarios.loop_config import loop_config, loop_manifest
 
 
 class RefusingRouter(FakeOpenRouter):
@@ -54,8 +52,3 @@ def experiment(root, *, refusals=3, second_step=False, status=429, retries=3, bu
 CASES = {'part-a': {'second_step': True, 'retries': 0}, 'replaced': {},
          'exhausted': {'refusals': 24}, 'budget': {'second_step': True, 'budget': .002},
          'server-error': {'status': 503}}
-
-if __name__ == '__main__':
-    for name, kwargs in CASES.items():
-        experiment(Path(sys.argv[1]) / name, **kwargs)
-        print(name, flush=True)

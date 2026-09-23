@@ -1,14 +1,13 @@
-"""WO-7's zero-spend repeated null-final-content experiment."""
+"""Fake-only null final scenarios shared by regression tests."""
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
 from fake_openrouter import FakeOpenRouter
-from test_driver_loop import loop_config, loop_manifest
 
 from mcp_e2e_harness.runner import run
+from scenarios.loop_config import loop_config, loop_manifest
 
 REASONING = 'WO7 reasoning-only marker: next operation {"note_id":"n03","folder":"inbox"}'
 
@@ -56,7 +55,3 @@ def experiment(root: Path, crowded=False):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-
-
-if __name__ == "__main__":
-    experiment(Path(sys.argv[1]), crowded="--crowded" in sys.argv)

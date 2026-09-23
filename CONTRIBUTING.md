@@ -18,6 +18,10 @@ python tests/check_known_failures.py                         # the actual CI gat
 
 PEP 8-compliant Python. Line length: ruff enforces 120 columns (`pyproject.toml`), which is the hard limit; wrapping earlier, around ~80 columns, is a soft preference for new code where it doesn't hurt readability, not a rule worth reflowing existing lines to satisfy. Markdown follows the one-line-per-paragraph convention above instead of a column target.
 
+Organize regression tests by behavior or component, not by work-order number; add to an existing relevant module where practical. Shared integration scenarios belong in `tests/scenarios/`, and shared pytest fixtures in `tests/conftest.py`. Tests must not depend on disposable acceptance scripts or files under `runs/`. See `tests/README.md` for the layout.
+
+One-off acceptance drivers, reports, and generated artifacts belong under the ignored `runs/` directory. Extract any reusable fixtures or regression assertions into the tracked test suite before treating an acceptance driver as disposable. Checked-in reference data under `tests/fixtures/` remains part of the regression suite.
+
 ## Commit conventions
 
 Commit each logical unit of work as you go, rather than batching unrelated changes into one commit — prefer several small, clear commits over one large one. Wrap commit message bodies at ~80 columns (commit messages are the one place in this repo that *does* get a column wrap, since they're read as fixed-width text by `git log`, not edited later).

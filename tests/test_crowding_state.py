@@ -1,8 +1,9 @@
+"""Crowding state predicates across consumer families."""
 import json
 
 import pytest
-from wo9_acceptance import experiment
-from wo10_acceptance import CASES
+from scenarios.crowding import experiment
+from scenarios.crowding_state import CASES
 
 from mcp_e2e_harness.crowding import PROCEDURES
 

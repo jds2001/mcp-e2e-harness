@@ -1,9 +1,9 @@
-"""S17/S18 classification, retained attempts, budgets, and operator evidence."""
+"""Whole-invocation replacement eligibility, attempt retention, and budgets."""
 import json
 
 import pytest
-from test_driver_loop import loop_config, loop_manifest
-from wo9_acceptance import experiment
+from scenarios.crowding import experiment
+from scenarios.loop_config import loop_config, loop_manifest
 
 from mcp_e2e_harness.drivers.base import TurnSpec
 from mcp_e2e_harness.drivers.loop import LoopDriver

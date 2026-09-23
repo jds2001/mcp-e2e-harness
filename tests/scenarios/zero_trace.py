@@ -1,4 +1,4 @@
-"""WO-8's three zero-spend, zero-trace acceptance rows."""
+"""Fake-only zero trace scenarios shared by regression tests."""
 from __future__ import annotations
 
 import copy
@@ -8,13 +8,13 @@ from pathlib import Path
 
 from conftest import FakeDriver, manifest_data, write_manifest
 from fake_openrouter import FakeOpenRouter
-from test_driver_loop import loop_config, loop_manifest
-from wo7_acceptance import REASONING
 
 from mcp_e2e_harness.drivers.base import TurnSpec
 from mcp_e2e_harness.drivers.loop import LoopDriver
 from mcp_e2e_harness.manifest import load_manifest
 from mcp_e2e_harness.runner import RunConfig, run
+from scenarios.loop_config import loop_config, loop_manifest
+from scenarios.null_final import REASONING
 
 
 class FirstNullRouter(FakeOpenRouter):
@@ -69,7 +69,3 @@ def experiment(root: Path, kind="loop", repeats=None):
                     os.environ[key] = value
     (root / "progress.txt").write_text("\n".join(logs) + "\n")
     return config, result
-
-
-if __name__ == "__main__":
-    experiment(Path(sys.argv[1]), sys.argv[2] if len(sys.argv) > 2 else "loop")

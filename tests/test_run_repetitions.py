@@ -1,97 +1,24 @@
-"""WO-6: cell identity, checks per cell, and whole-grid repetitions."""
+"""Repeated grid execution, invocation paths, counts, budgets, and environment."""
 from __future__ import annotations
 
-import copy
 import json
 from collections import Counter
 
 import pytest
-from conftest import FakeDriver, manifest_data, write_manifest
-from test_cli import claude_cell_data
-from test_driver_loop import fake_openrouter as router_fixture  # noqa: F401
-from test_driver_loop import loop_config, loop_manifest
-from wo6_acceptance import experiment
+from conftest import FakeDriver, claude_cell_data, manifest_data, write_manifest
+from scenarios.loop_config import loop_config, loop_manifest
+from scenarios.repetitions import experiment
 
-from mcp_e2e_harness.checks import evaluate_checks
 from mcp_e2e_harness.cli import main
-from mcp_e2e_harness.drivers.loop import LoopDriver
 from mcp_e2e_harness.manifest import load_manifest
 from mcp_e2e_harness.runner import (
     HarnessError,
     RunConfig,
     answers_by_prompt,
-    cell_id_of,
     meta_relative_path,
-    recorded_cell_env,
     row_relative_path,
     run,
 )
-
-
-def test_checks_pool_repetitions_and_name_rows():
-    check = {"id": "ok", "applies_to": {"tool": "*"}, "assert": {"present": ["/ok"]}}
-    report = evaluate_checks([check], {
-        "control/A/A1/r01": [{"index": 0, "ok": True}],
-        "control/A/A1/r02": [{"index": 0, "ok": True}],
-        "treatment/A/A1/r01": [{"index": 7}],
-    }, cells=["control", "treatment", "empty"], metadata={
-        "control/A/A1/r01": {"cell": "control", "prompt_id": "A1", "repetition": 1},
-        "control/A/A1/r02": {"cell": "control", "prompt_id": "A1", "repetition": 2},
-        "treatment/A/A1/r01": {"cell": "treatment", "prompt_id": "A1", "repetition": 1},
-    })[0]
-    assert report["outcome"] == "fail" and report["matched"] == 3
-    assert {k: (v["outcome"], v["matched"]) for k, v in report["cells"].items()} == {
-        "control": ("pass", 2), "treatment": ("fail", 1), "empty": ("vacuous", 0)}
-    assert report["failures"] == [{"invocation": "treatment/A/A1/r01", "cell": "treatment",
-                                    "prompt_id": "A1", "repetition": 1, "index": 7,
-                                    "details": ["/ok missing"]}]
-
-
-@pytest.mark.parametrize("records, expected", [
-    ({"a/A/P": [], "b/A/P": []}, "vacuous"),
-    ({"a/A/P": [{"tool": "search", "ok": True}], "b/A/P": []}, "pass"),
-    ({"a/A/P": [{"tool": "search"}], "b/A/P": []}, "fail"),
-])
-def test_check_rollup_order(records, expected):
-    check = {"id": "c", "applies_to": {"tool": "*"}, "assert": {"present": ["/ok"]}}
-    assert evaluate_checks([check], records)[0]["outcome"] == expected
-
-
-def test_cell_errors_win_and_other_cells_are_still_evaluated():
-    check = {"id": "c", "applies_to": {"tool": "search", "when": [
-        {"pointer": "/tool", "matches": "("}]}, "assert": {"present": ["/ok"]}}
-    report = evaluate_checks([check], {"a/A/P": [{"tool": "search"}],
-                                      "b/A/P": [{"tool": "other"}]}, metadata={
-        "a/A/P": {"cell": "a"}, "b/A/P": {"cell": "b"}})[0]
-    assert report["outcome"] == report["cells"]["a"]["outcome"] == "error"
-    assert report["cells"]["b"]["outcome"] == "vacuous"
-    check["assert"] = {"bad": True}
-    report = evaluate_checks([check], {}, cells=["a", "b"])[0]
-    assert all(c["outcome"] == "error" for c in report["cells"].values())
-
-
-@pytest.mark.parametrize("change", [
-    {"knobs": {"temperature": 1}}, {"setup": [{"tool": "x", "args": {}}]},
-    {"env": {"ARM": "other"}}, {"groups": ["B"]}, {"prompts": ["A1"]},
-    {"variant": "other"}, {"model": "other"}, {"context": "crowded"},
-    {"tool_surface": ["one"]}, {"provider": "other"}, {"scaffold": "other"},
-])
-def test_identity_includes_all_components(change):
-    cell = loop_manifest()["cells"]["loop-cell"]
-    assert cell_id_of("a", cell, LoopDriver()) != cell_id_of("b", dict(cell, **change), LoopDriver())
-
-
-def test_identity_canonical_notes_and_secrets():
-    cell = loop_manifest()["cells"]["loop-cell"]
-    cell.update(env={"ARM": "control", "TOKEN": {"$secret": "FIRST"}}, groups=["A", "B"])
-    other = copy.deepcopy(cell)
-    other.update(notes="annotation", groups=["B", "A"])
-    other["env"] = {"TOKEN": {"$secret": "SECOND"}, "ARM": "control"}
-    other["knobs"] = dict(reversed(list(cell["knobs"].items())))
-    assert cell_id_of("a", cell) == cell_id_of("b", other)
-    assert recorded_cell_env(cell) == {"ARM": "control", "TOKEN": None}
-    other["env"]["OTHER_TOKEN"] = other["env"].pop("TOKEN")
-    assert cell_id_of("a", cell) != cell_id_of("b", other)
 
 
 @pytest.mark.parametrize("value", ["0", "-1", "1.5", "abc"])
@@ -185,8 +112,8 @@ def test_fake_acceptance_repeats(tmp_path, answerless):
     assert all(f["cell"] == "treatment" and f["prompt_id"] == "A1" for f in report["failures"])
 
 
-def test_cell_cap_skips_remaining_prompts_and_repetitions(tmp_path, router_fixture):  # noqa: F811
-    router_fixture.cost_per_request = 0.5
+def test_cell_cap_skips_remaining_prompts_and_repetitions(tmp_path, fake_openrouter):  # noqa: F811
+    fake_openrouter.cost_per_request = 0.5
     data = loop_manifest(budget_usd=1.0)
     data["prompts"].append(dict(data["prompts"][0], id="A2"))
     config = loop_config(tmp_path, data, repeats=3)
@@ -231,8 +158,8 @@ def test_repeated_product_crowding_and_measurements(tmp_path):
     assert manifest["measurements"]["coverage"]["rows"] == 2
 
 
-def test_repeated_run_cap_stops_future_passes(tmp_path, router_fixture):  # noqa: F811
-    router_fixture.cost_per_request = 0.5
+def test_repeated_run_cap_stops_future_passes(tmp_path, fake_openrouter):  # noqa: F811
+    fake_openrouter.cost_per_request = 0.5
     config = loop_config(tmp_path, loop_manifest(), repeats=3, budget_usd=1.0)
     result = run(config)
     assert len(result.results) == 1

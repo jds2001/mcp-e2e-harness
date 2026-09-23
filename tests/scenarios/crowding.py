@@ -1,4 +1,4 @@
-"""WO-9 pre-turn failures and whole-invocation replacements, with no live spend."""
+"""Fake-only crowding scenarios shared by regression tests."""
 from __future__ import annotations
 
 import json
@@ -8,11 +8,11 @@ from pathlib import Path
 
 from conftest import FakeDriver, manifest_data, write_manifest
 from fake_openrouter import FakeOpenRouter
-from test_driver_loop import loop_config, loop_manifest
 
 from mcp_e2e_harness.drivers.base import TurnSpec
 from mcp_e2e_harness.manifest import load_manifest
 from mcp_e2e_harness.runner import RunConfig, run
+from scenarios.loop_config import loop_config, loop_manifest
 
 SCORED_PROMPT = "Please list the unfiled notes."
 
@@ -105,16 +105,3 @@ def experiment(root: Path, failures=(1,), retries=None, crash=False, scored_null
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-
-
-if __name__ == "__main__":
-    cases = {
-        "before": {}, "disabled": {"retries": 0},
-        "all-unmet": {"failures": (1, 2), "retries": 0}, "crash": {"crash": True},
-        "replaced": {"retries": 3}, "exhausted": {"failures": (1, 2, 3, 4), "retries": 3},
-        "scored-null": {"failures": (), "scored_null": True, "retries": 3},
-        "budget": {"failures": (1, 2, 3, 4), "budget": 0.004, "retries": 3},
-        "product-empty": {"product": True}, "product-crash": {"product": True, "crash": True},
-        "clean": {"failures": ()},
-    }
-    experiment(Path(sys.argv[1]), **cases[sys.argv[2]])

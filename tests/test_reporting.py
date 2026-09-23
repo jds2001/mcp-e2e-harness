@@ -1,9 +1,10 @@
+"""Durable checks and measurements reporting, identity, and recovery."""
 import hashlib
 import json
 
 import pytest
-from wo9_acceptance import experiment
-from wo11_acceptance import CASES, CHECKS, MEASURES
+from scenarios.crowding import experiment
+from scenarios.reporting import CASES, CHECKS, MEASURES
 
 from mcp_e2e_harness import checks, measurements
 from mcp_e2e_harness.cli import main

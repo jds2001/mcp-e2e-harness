@@ -1,4 +1,4 @@
-"""Reusable $0 fake-upstream WO-6 acceptance experiment (also used by tests)."""
+"""Fake-only repetitions scenarios shared by regression tests."""
 from __future__ import annotations
 
 import copy
@@ -7,9 +7,9 @@ import sys
 from pathlib import Path
 
 from fake_openrouter import FakeOpenRouter
-from test_driver_loop import loop_config, loop_manifest
 
 from mcp_e2e_harness.runner import run
+from scenarios.loop_config import loop_config, loop_manifest
 
 
 def acceptance_data():
@@ -19,7 +19,7 @@ def acceptance_data():
                      for name in ("control", "treatment")}
     data["server"]["transport"] = {
         "type": "stdio", "command": sys.executable,
-        "args": [str(Path(__file__).with_name("fake_env_server.py"))],
+        "args": [str(Path(__file__).resolve().parents[1] / "fake_env_server.py")],
         "env": {"WO6_ARM": "transport-default"}}
     data["checks"] = [{"id": "control-response", "applies_to": {"tool": "*"},
                        "assert": {"matches": {"pointer": "/response/content/0/text", "regex": "^control$"}}}]
@@ -66,8 +66,3 @@ def experiment(root, repeats=None, answerless=False):
                 os.environ.pop(key, None)
             else:
                 os.environ[key] = value
-
-
-if __name__ == "__main__":
-    experiment(Path(sys.argv[1]), int(sys.argv[2]) if len(sys.argv) > 2 else None,
-               answerless="--answerless" in sys.argv)

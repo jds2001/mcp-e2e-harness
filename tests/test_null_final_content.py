@@ -1,4 +1,4 @@
-"""S16: record missing final content, preserve transcripts, never invent an answer."""
+"""Null-final content classification, transcripts, and answer artifacts."""
 from __future__ import annotations
 
 import copy
@@ -8,8 +8,8 @@ from dataclasses import replace
 
 import pytest
 from conftest import FakeDriver, manifest_data, write_manifest
-from test_driver_loop import loop_config, loop_manifest
-from wo7_acceptance import REASONING, experiment
+from scenarios.loop_config import loop_config, loop_manifest
+from scenarios.null_final import REASONING, experiment
 
 from mcp_e2e_harness import loop_consumer
 from mcp_e2e_harness.drivers.base import TurnSpec

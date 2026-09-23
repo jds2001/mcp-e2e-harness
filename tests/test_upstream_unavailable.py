@@ -1,10 +1,11 @@
+"""Upstream refusal diagnostics, retries, replacement, and recovery."""
 import io
 import json
 import urllib.error
 from unittest.mock import Mock
 
 import pytest
-from wo12_acceptance import CASES, experiment
+from scenarios.upstream_refusals import CASES, experiment
 
 from mcp_e2e_harness import loop_consumer as consumer
 from mcp_e2e_harness.reporting import rebuild
@@ -96,8 +97,8 @@ def test_breach_prevents_replacement():
 
 @pytest.mark.parametrize('breach', [False, True])
 def test_preturn_unavailability_and_breach_precedence(tmp_path, monkeypatch, breach):
-    from wo9_acceptance import experiment as crowded_experiment
-    from wo12_acceptance import RefusingRouter
+    from scenarios.crowding import experiment as crowded_experiment
+    from scenarios.upstream_refusals import RefusingRouter
 
     from mcp_e2e_harness.drivers.loop import LoopDriver
 

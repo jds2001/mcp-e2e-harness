@@ -1,11 +1,9 @@
-"""WO-10 state-check acceptance; local fake upstreams only."""
+"""Fake-only crowding state scenarios shared by regression tests."""
 import json
 import sys
-from pathlib import Path
-
-from wo9_acceptance import PreturnRouter, ProductPreturnDriver, experiment
 
 from mcp_e2e_harness.drivers.base import TurnSpec
+from scenarios.crowding import PreturnRouter, ProductPreturnDriver
 
 
 class StateRouter(PreturnRouter):
@@ -62,8 +60,3 @@ CASES = {
     'clean': {'failures': ()}, 'replaced': {}, 'disabled': {'retries': 0},
     'budget': {'failures': (1, 2, 3, 4), 'budget': .004},
 }
-
-if __name__ == '__main__':
-    for name, kwargs in CASES.items():
-        experiment(Path(sys.argv[1]) / name, **kwargs)
-        print(name, flush=True)

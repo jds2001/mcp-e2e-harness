@@ -1,10 +1,10 @@
-"""WO-8: zero-trace exemption needs row-local loop evidence."""
+"""Evidence required for zero-trace null-final liveness exemptions."""
 from __future__ import annotations
 
 import json
 
 import pytest
-from wo8_acceptance import experiment
+from scenarios.zero_trace import experiment
 
 from mcp_e2e_harness.drivers.loop import LoopDriver
 from mcp_e2e_harness.runner import meta_relative_path, zero_trace_cells
