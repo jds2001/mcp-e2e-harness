@@ -28,6 +28,10 @@ WO-9's product-driver report back showed that a pre-turn which exits 0 and write
 
 For each crowding procedure the harness ships, the predicate as declared and where it lives. Whether any existing test fixture relied on an under-filed pre-turn passing.
 
+## Status
+
+**Accepted 2026-09-22** from `runs/2026-09-22-wo10/` with the report read second; commit f4d4cb3. Record in `10-harness.md` → Layer 2.
+
 ## Out of scope
 
 Any change to the procedures' prompts or notes, or to `loop-scaffold@1`. Retrospective re-marking of rows already on disk — the three live rows are the suite's to disposition, and the predicate is applied to them by hand.

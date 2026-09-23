@@ -18,6 +18,10 @@
 
 The three matrix runs' `checks-report.json` and the failure entries; a run with a deliberately failing checks stage (a bad regex is not enough — inject an exception) showing the manifest's stage record and the all-`error` report; the rebuilt manifest and checks report for the maintainer's run, with the `rebuilt` block and the null-with-note fields; the list of path-parsing sites from item 1. Test names and count before and after.
 
+## Status
+
+**Accepted 2026-09-22** from `runs/2026-09-22-wo11/` and the rebuilt maintainer run, report read second; commit b93c9b0. DR-4 closed. Record in `10-harness.md` → Layer 2.
+
 ## Out of scope
 
 Changing the attempt layout: it stands as WO-9 accepted it. Anything about why the pre-turns went unmet (PM-2).
