@@ -19,6 +19,7 @@ from pathlib import Path
 from .checks import lint_check
 from .drivers import DRIVERS
 from .manifest import Manifest, ManifestError, load_manifest
+from .reporting import rebuild
 from .runner import (
     DEFAULT_TIMEOUT_S,
     EGRESS_PASS,
@@ -92,6 +93,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"FATAL: {exc}")
         return 2
     return 1 if result.failures else 0
+
+
+def cmd_report(args: argparse.Namespace) -> int:
+    try:
+        record = rebuild(Path(args.run_dir), overwrite=args.overwrite,
+                         manifest_path=Path(args.manifest) if args.manifest else None)
+    except (OSError, ValueError, SecretLeakError) as exc:
+        print(f"FATAL: {exc}")
+        return 2
+    return 1 if record["failures"] else 0
 
 
 def cmd_probe_driver(args: argparse.Namespace) -> int:
@@ -179,6 +190,12 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mcp-e2e", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_report = sub.add_parser("report", help="rebuild run-level reports from retained rows")
+    p_report.add_argument("--run-dir", required=True)
+    p_report.add_argument("--manifest", help="pinned suite manifest, if not discoverable beside the run")
+    p_report.add_argument("--overwrite", action="store_true", help="replace an existing run manifest")
+    p_report.set_defaults(func=cmd_report)
 
     p_validate = sub.add_parser("validate", help="load the manifest and lint its checks; run nothing")
     p_validate.add_argument("--manifest", required=True)

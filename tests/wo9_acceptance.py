@@ -67,10 +67,15 @@ class ProductPreturnDriver(FakeDriver):
 
 
 def experiment(root: Path, failures=(1,), retries=None, crash=False, scored_null=False,
-               budget=None, product=False, cell_budget=None, router_factory=PreturnRouter, product_driver=None):
+               budget=None, product=False, cell_budget=None, router_factory=PreturnRouter, product_driver=None,
+               repeats=2, checks=None, measurements=None):
     root.mkdir(parents=True, exist_ok=True)
     logs = []
     data = manifest_data() if product else loop_manifest()
+    if checks is not None:
+        data["checks"] = checks
+    if measurements is not None:
+        data["measurements"] = measurements
     cell_name = "basic" if product else "loop-cell"
     data["cells"][cell_name].update(context="crowded", crowding={
         "procedure": "neutral-file-triage@2", "collision_review": "fixture disjoint server names"})
@@ -81,7 +86,7 @@ def experiment(root: Path, failures=(1,), retries=None, crash=False, scored_null
     os.environ["MCP_E2E_OPENROUTER_UPSTREAM"] = fake.start()
     os.environ["OPENROUTER_API_KEY"] = "sk-or-wo9-test-0123456789"
     try:
-        kwargs = {"repeats": 2, "log": logs.append, "budget_usd": budget}
+        kwargs = {"repeats": repeats, "log": logs.append, "budget_usd": budget}
         if retries is not None:
             kwargs["precondition_retries"] = retries
         if product:

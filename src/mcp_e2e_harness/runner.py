@@ -36,13 +36,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import __version__, crowding, distractor
-from . import checks as checks_mod
-from . import measurements as measurements_mod
 from .api_capture import ApiSurfaceRecorder, read_records, summarize, surface_mismatches
 from .drivers import DRIVERS, Driver
 from .drivers.base import TurnContext
 from .manifest import Manifest
 from .mcp_client import MCPClientError, StdioMCPClient
+from .reporting import finish_reports, write_json
 from .secrets import assert_clean, collect_scan_set, is_secret_ref, resolve_env_map
 
 DEFAULT_TIMEOUT_S = 900
@@ -713,7 +712,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     # Row measurements (30-checks.md, S14): mechanical values across a trace record
     # and this row's answer, recorded beside the row with the method's name and hash.
     # Never an outcome; nothing here reaches checks-report.json.
-    row_measurements = measurements_mod.compute_measurements(manifest.measurements, records, answer)
+    row_measurements = {}  # Derived only after the run manifest checkpoint exists.
 
     meta = {
         "prompt_id": entry["id"],
@@ -1388,6 +1387,14 @@ def run(config: RunConfig) -> RunResult:
                            "in one directory -- the diff by prompt id is what gives a re-run its "
                            "meaning.")
     config.run_dir.mkdir(parents=True, exist_ok=True)
+    _write_scanned(config.run_dir / "manifest-source.json", manifest.raw_bytes.decode(),
+                   collect_scan_set(manifest.data))
+    write_json(config.run_dir / "run-input.json", {
+        "selection": {"cells": config.cells, "repeats": config.repeats,
+                      "precondition_retries": config.precondition_retries,
+                      "groups": sorted(config.groups) if config.groups else None,
+                      "prompts": sorted(config.prompts) if config.prompts else None},
+        "budget_usd": config.budget_usd, "dry_run": config.dry_run}, collect_scan_set(manifest.data))
 
     driver_ids = {manifest.cells[c]["driver"] for c in config.cells}
     driver_versions = ({d: None for d in driver_ids} if config.dry_run else
@@ -1716,65 +1723,7 @@ def run(config: RunConfig) -> RunResult:
             cell_marks[cell_name]["provider_verified"] = sorted(verified) or None
 
     checks_report: list[dict] = []
-    if manifest.checks and not config.dry_run:
-        records_by_invocation = {}
-        for meta in results:
-            trace_path = config.run_dir / meta_relative_path(config, meta) / "trace.jsonl"
-            records, _ = _read_trace(trace_path)
-            records_by_invocation[meta_relative_path(config, meta).as_posix()] = records
-        checks_report = checks_mod.evaluate_checks(manifest.checks, records_by_invocation, cells=config.cells)
-        failures += sum(1 for c in checks_report if c["outcome"] == "error")
-        # Every row a loop cell emits carries its reproducibility mark (loop #4):
-        # failure references name an invocation, so the mark rides on each one.
-        for check in checks_report:
-            for failure in check.get("failures") or []:
-                cell_of_row = str(failure.get("invocation", "")).split("/")[0]
-                if cell_of_row in cell_marks:
-                    failure["driver_family"] = cell_marks[cell_of_row]["driver_family"]
-                    failure["reproducibility"] = cell_marks[cell_of_row].get("reproducibility")
-        (config.run_dir / "checks-report.json").write_text(json.dumps({
-            "cells": {c: {"driver": manifest.cells[c]["driver"], **cell_marks.get(c, {})}
-                      for c in config.cells},
-            "checks": checks_report,
-        }, indent=2) + "\n")
-        for check in checks_report:
-            log(f"check      : {check['id']}: {check['outcome']}  (matched {check['matched']})")
-
-    # Row measurements: a summary of what was recorded, never an outcome (S14).
     measurement_summary: dict[str, dict] = {}
-    for decl in manifest.measurements:
-        entries = [e for meta in results for e in (meta.get("measurements") or {}).get(decl["name"], [])]
-        measure = measurements_mod.MEASURES[decl["measure"]]
-        measurement_summary[decl["name"]] = {
-            "measure": measure.full_name, "method_hash": measure.content_hash(),
-            "rows": sum(1 for meta in results if (meta.get("measurements") or {}).get(decl["name"])),
-            "records_measured": sum(1 for e in entries if e.get("note") is None),
-            "records_null": sum(1 for e in entries if e.get("note") is not None)}
-        log(f"measurement: {decl['name']} ({measure.full_name} {measure.content_hash()[:16]}): "
-            f"{measurement_summary[decl['name']]['records_measured']} record(s) measured, "
-            f"{measurement_summary[decl['name']]['records_null']} null -- recorded per row, not an outcome")
-
-    if budget_stops:
-        for stop in budget_stops:
-            log(f"budget stop: {stop['scope']} cap ${stop['cap_usd']} reached "
-                f"(spent ${stop['spent_usd']:.6f}) at {stop['at']}")
-    if spend_run or config.budget_usd is not None:
-        log(f"spend      : ${spend_run:.6f} actual (summed usage.cost)"
-            + (f"  of run cap ${config.budget_usd}" if config.budget_usd is not None else ""))
-
-    if preconditions_unmet:
-        log(f"preconditions unmet: {len(preconditions_unmet)} (unscoreable, counted apart from harness failures)")
-    for cell_name, prompts in invocation_counts.items():
-        for prompt, counts in prompts.items():
-            log(f"invocations {cell_name}/{prompt}: asked {counts['asked']}, "
-                f"reached {counts['reached']}, attempts {counts['attempts']}")
-    if consumer_limits:
-        log(f"consumer limits: {len(consumer_limits)}  (answerless consumer outcomes, S13 -- scored as a "
-            f"failure to answer, NOT harness failures): "
-            + ", ".join(f"{k} [{v}]" for k, v in consumer_limits.items()))
-    log(f"harness failures: {failures}  (these are NOT consumer results)")
-    log("This harness does not score. Pass/fail against the pinned criteria in each "
-        "meta.json is a human/spec-session judgment.")
 
     run_manifest = {
         "harness_version": __version__,
@@ -1820,8 +1769,34 @@ def run(config: RunConfig) -> RunResult:
         "failures": failures,
         "results": results,
     }
-    _write_scanned(config.run_dir / "run-manifest.json",
-                   json.dumps(run_manifest, indent=2) + "\n", scan)
+    checks_report = finish_reports(
+        config.run_dir, run_manifest, manifest,
+        {meta_relative_path(config, meta).as_posix(): meta for meta in results},
+        update_rows=True, log=log)
+    failures = run_manifest["failures"]
+
+    if budget_stops:
+        for stop in budget_stops:
+            log(f"budget stop: {stop['scope']} cap ${stop['cap_usd']} reached "
+                f"(spent ${stop['spent_usd']:.6f}) at {stop['at']}")
+    if spend_run or config.budget_usd is not None:
+        log(f"spend      : ${spend_run:.6f} actual (summed usage.cost)"
+            + (f"  of run cap ${config.budget_usd}" if config.budget_usd is not None else ""))
+
+    if preconditions_unmet:
+        log(f"preconditions unmet: {len(preconditions_unmet)} (unscoreable, counted apart from harness failures)")
+    for cell_name, prompts in invocation_counts.items():
+        for prompt, counts in prompts.items():
+            log(f"invocations {cell_name}/{prompt}: asked {counts['asked']}, "
+                f"reached {counts['reached']}, attempts {counts['attempts']}")
+    if consumer_limits:
+        log(f"consumer limits: {len(consumer_limits)}  (answerless consumer outcomes, S13 -- scored as a "
+            f"failure to answer, NOT harness failures): "
+            + ", ".join(f"{k} [{v}]" for k, v in consumer_limits.items()))
+    log(f"harness failures: {failures}  (these are NOT consumer results)")
+    log("This harness does not score. Pass/fail against the pinned criteria in each "
+        "meta.json is a human/spec-session judgment.")
+
     return RunResult(run_dir=config.run_dir, results=results, failures=failures,
                      zero_trace_cells=dead, checks_report=checks_report,
                      driver_probes=driver_probes, voided_cells=voided,
