@@ -27,6 +27,10 @@ Part B: a fake-upstream run, `--repeats 2`, where the fake refuses one repetitio
 Part A: 
 A fake-upstream run with `--repeats 2` where the fake answers 429 three times on one repetition's second step: that row's `meta.json` block and failure text, `loop.retries`, the slot reading `failed`, `failures: 1`, `answers` reading `invocations: 2, answered: 1`; a rebuild of the same directory by `report --run-dir` agreeing on the slot status.
 
+## Status
+
+**Accepted 2026-09-23**, both parts, from `runs/2026-09-23-wo12/` with the report read second, rebuilds re-run by the spec session; commit 01cdd33. Record in `10-harness.md` → Layer 2.
+
 ## Out of scope
 
 BYOK or direct-endpoint changes (`50-drivers.md` → loop, "Leaving the shared pool"; not ordered).
