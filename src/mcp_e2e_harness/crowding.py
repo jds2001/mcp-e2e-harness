@@ -41,6 +41,16 @@ class CrowdingProcedure:
     # The pre-turn that puts the consumer mid-task before the scored prompt lands.
     opening_prompt: str = field(repr=False)
 
+    # Instrument validation, separate from the consumer-visible content hash.
+    expected_filed: tuple[str, ...] = ("n01", "n02", "n03", "n04")
+
+    def check_state(self, state: dict) -> dict:
+        if not isinstance(state, dict) or not isinstance(state.get("filed"), dict):
+            raise ValueError("state must contain a filed object")
+        expected, observed = sorted(self.expected_filed), sorted(state["filed"])
+        return {"expected": expected, "observed": observed,
+                "passed": observed == expected}
+
     @property
     def full_name(self) -> str:
         return f"{self.name}@{self.version}"

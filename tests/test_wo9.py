@@ -34,7 +34,9 @@ def test_attempts(tmp_path, case, kwargs, counts, unmet):
     for path, item in manifest['preconditions_unmet'].items():
         row = json.loads((config.run_dir / path / 'meta.json').read_text())
         reported = json.loads((config.run_dir / path / 'loop-result-crowding.json').read_text())['consumer_limit']
-        assert row['precondition_unmet'] == {**reported, 'stage': 'crowding_preturn'}
+        assert row['precondition_unmet'] == {**reported, 'stage': 'crowding_preturn',
+                                             'expected': ['n01', 'n02', 'n03', 'n04'],
+                                             'observed': ['n01'], 'passed': False}
         assert row['harness_failure'].startswith('null_final_content:')
         assert row['harness_failure'] in log
         assert not row['consumer_limit'] and not row['answer_chars']
@@ -55,7 +57,7 @@ def test_attempts(tmp_path, case, kwargs, counts, unmet):
         assert 'REPLACEMENT: null_final_content:' in log
         assert (config.run_dir / slots[0]['result'] / 'answer.txt').read_text()
     if case in {'exhausted', 'disabled', 'all'}:
-        assert slots[0]['status'] == 'exhausted'
+        assert slots[0]['status'] == ('replacement_disabled' if kwargs.get('retries') == 0 else 'exhausted')
     if 'budget' in case:
         assert manifest['budget']['stops'][0]['scope'] == ('cell' if case == 'cell-budget' else 'run')
         assert slots[0]['status'] == 'budget_stopped'
@@ -96,8 +98,8 @@ def test_product_preturn_observed(tmp_path, crash):
     assert len(result.results) == 2
     for row in result.results:
         assert row['precondition_unmet'] is None
-        assert row['scored_turn_reached'] is not crash
-    assert result.failures == (3 if crash else 0)
+        assert row['scored_turn_reached'] is False
+    assert result.failures == 3
 
 
 @pytest.mark.parametrize('cause', ['null_final_content', 'step_cap', 'context_length'])

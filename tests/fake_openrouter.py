@@ -168,6 +168,20 @@ class FakeOpenRouter:
         messages = body.get("messages") or []
         if self._is_probe(body):
             message = self._probe_message()
+        elif any(m.get("role") == "user" and str(m.get("content", "")).startswith(
+                "You're helping tidy the office's shared notes inbox") for m in messages[-1:]) or (
+                messages and next((m.get("content", "") for m in reversed(messages)
+                                   if m.get("role") == "user"), "").startswith(
+                                       "You're helping tidy the office's shared notes inbox")):
+            last_user = max(i for i, m in enumerate(messages) if m["role"] == "user")
+            calls = sum(m["role"] == "tool" for m in messages[last_user + 1:])
+            if calls < 4:
+                message = {"role": "assistant", "content": None, "tool_calls": [{
+                    "id": f"file_{calls}", "type": "function", "function": {
+                        "name": "mcp__shared_notes__file_note",
+                        "arguments": json.dumps({"note_id": f"n{calls + 1:02d}", "folder": "logistics"})}}]}
+            else:
+                message = {"role": "assistant", "content": "Filed four notes."}
         elif self.runaway or not messages or messages[-1].get("role") != "tool":
             target = self.tool_to_call if self.tool_to_call in names else next(
                 (n for n in names if n.endswith("list_unfiled_notes")), names[0] if names else None)

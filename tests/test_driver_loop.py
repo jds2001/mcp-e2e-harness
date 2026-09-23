@@ -556,19 +556,19 @@ def test_crowded_cell_runs_the_preturn_first_in_the_same_conversation(tmp_path, 
     assert result.failures == 0, result.results[0]["harness_failure"]
     meta = result.results[0]
     assert meta["crowding"]["preturn_ok"] is True
-    assert meta["loop"]["preturn"] == {"steps": 2, "tool_calls": 1, "step_cap_hit": False}
+    assert meta["loop"]["preturn"] == {"steps": 5, "tool_calls": 4, "step_cap_hit": False}
     scored = fake.scored_requests
     opening = "You're helping tidy the office's shared notes inbox"
     # Ordering: the pre-turn's requests come first, then the scored turn resumes the
     # same conversation with the crowding still in it.
     assert scored[0]["messages"][1]["content"].startswith(opening)
     assert scored[0]["messages"][-1]["role"] == "user"
-    scored_turn = scored[2]
+    scored_turn = scored[5]
     roles = [m["role"] for m in scored_turn["messages"]]
     assert roles[:2] == ["system", "user"] and roles[-1] == "user"
     assert scored_turn["messages"][1]["content"].startswith(opening)
     assert scored_turn["messages"][-1]["content"] == "Please list the unfiled notes."
-    assert roles.count("tool") == 1  # the pre-turn's tool result is in context
+    assert roles.count("tool") == 4  # the pre-turn's tool result is in context
     # Both turns offer the same surface: SUT tools plus the distractor's.
     expected = sorted(SUT_TOOLS + ["mcp__shared_notes__file_note", "mcp__shared_notes__list_unfiled_notes",
                                    "mcp__shared_notes__read_note"])

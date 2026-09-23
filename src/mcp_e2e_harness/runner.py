@@ -405,14 +405,24 @@ def _crowding_preturn(driver: Driver, ctx_base: dict, procedure: crowding.Crowdi
     outcome = driver.preturn_outcome(turn, proc.returncode)
     if outcome:
         record["consumer_limit"] = outcome
+    state_error = None
+    try:
+        state_check = procedure.check_state(json.loads((dest / "distractor-state.json").read_text()))
+        record["state_check"] = state_check
+    except (OSError, ValueError) as exc:
+        state_error = f"crowding state unavailable: {dest / 'distractor-state.json'}: {exc}"
+        record["state_check"] = {"error": state_error}
     _write_scanned(dest / "crowding.json", json.dumps(record, indent=2) + "\n", scan)
-    if outcome:
-        raise PreconditionUnmet(outcome, record, dest / "crowding.json")
-    if proc.returncode != 0:
+    if state_error:
+        raise HarnessError(state_error)
+    if proc.returncode != 0 and not outcome:
         raise HarnessError(
             f"crowding pre-turn exited {proc.returncode}; the consumer is NOT mid-task, so "
             "running the scored prompt would mislabel a fresh cell as crowded. See "
             f"{dest / 'crowding.json'}.")
+    if outcome or not state_check["passed"]:
+        outcome = outcome or {"cause": "state_mismatch", "detail": "filed set differs from the mid-task predicate"}
+        raise PreconditionUnmet({**outcome, **state_check}, record, dest / "crowding.json")
     return record
 
 
@@ -786,7 +796,9 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "crowding": ({"procedure": procedure.name, "version": procedure.version,
                       "content_hash": procedure.content_hash(),
                       "collision_review": cell["crowding"]["collision_review"],
-                      "preturn_ok": crowding_record is not None and crowding_record["exit_status"] == 0}
+                      "state_check": crowding_record.get("state_check") if crowding_record else None,
+                      "preturn_ok": bool(crowding_record and crowding_record["exit_status"] == 0
+                                         and crowding_record["state_check"]["passed"])}
                      if procedure is not None else None),
         # Criteria travel WITH the result so a scorer never has to reconstruct them,
         # and so editing one after seeing a result is visible in the diff.
@@ -801,7 +813,7 @@ def answers_by_prompt(results: list[dict], cell_name: str) -> dict[str, dict]:
     """The distinct-answer count per prompt id within one cell (loop requirement 11, WO-3/WO-4).
 
     Requirement 11 concerns repeats of *one* prompt, so the count is keyed by prompt id:
-    ``invocations`` counts attempts; ``answered`` counts non-empty answers. The
+    ``invocations`` counts attempts that reached the scored turn; ``answered`` counts non-empty answers. The
     digest map shows which answered rows repeat without opening answer files. The
     across-prompts total lives beside it under its own clearly labeled key, never here.
     """
@@ -811,6 +823,8 @@ def answers_by_prompt(results: list[dict], cell_name: str) -> dict[str, dict]:
             continue
         summary = answers.setdefault(meta["prompt_id"], {
             "invocations": 0, "answered": 0, "distinct": 0, "digests": {}})
+        if not meta.get("scored_turn_reached", True):
+            continue
         summary["invocations"] += 1
         if not meta.get("answer_chars"):
             continue
@@ -1489,7 +1503,8 @@ def run(config: RunConfig) -> RunResult:
             cell = manifest.cells[cell_name]
             driver = config.drivers[cell["driver"]]
             if run_stopped:
-                log(f"cell {cell_name}: not started -- the run-level budget cap stopped the run")
+                status = "stopped" if any(m["cell"] == cell_name for m in results) else "not started"
+                log(f"cell {cell_name}: {status} -- the run-level budget cap stopped the run")
                 continue
             advertised = advertised_by_cell.get(cell_name)
             # S8 (from DR-1): fail-fast instrument liveness at spawn. The SUT is spawned
@@ -1559,7 +1574,7 @@ def run(config: RunConfig) -> RunResult:
                         budget_stops.append(stop)
                         run_stopped = True
                         log(f"BUDGET STOP: run spend ${spend_run:.6f} reached the run cap "
-                            f"${config.budget_usd:.2f} before {cell_name}/{entry['id']}; the run stops "
+                            f"${config.budget_usd} before {cell_name}/{entry['id']}; the run stops "
                             f"cleanly, completed cells stand, {remaining} prompt(s) in this cell not run.")
                         break
                     if cell_cap is not None and spend_cell.get(cell_name, 0.0) >= cell_cap:
@@ -1572,7 +1587,7 @@ def run(config: RunConfig) -> RunResult:
                         budget_stops.append(stop)
                         capped_cells.add(cell_name)
                         log(f"BUDGET STOP: cell {cell_name} spend ${spend_cell[cell_name]:.6f} reached its "
-                            f"cap ${cell_cap:.2f} before {entry['id']}; {remaining} prompt(s) in this cell "
+                            f"cap ${cell_cap} before {entry['id']}; {remaining} prompt(s) in this cell "
                             "not run. Completed invocations stand.")
                         break
                     if attempt > 1:
@@ -1601,7 +1616,7 @@ def run(config: RunConfig) -> RunResult:
                     if meta.get("precondition_unmet"):
                         cause = meta["precondition_unmet"]["cause"]
                         preconditions_unmet[path] = {"slot": slot_name, "attempt": attempt, "cause": cause}
-                        slot["status"] = "exhausted"
+                        slot["status"] = "replacement_disabled" if config.precondition_retries == 0 else "exhausted"
                         flag = "  PRECONDITION UNMET"
                     elif meta["harness_failure"]:
                         failures += 1
@@ -1741,11 +1756,11 @@ def run(config: RunConfig) -> RunResult:
 
     if budget_stops:
         for stop in budget_stops:
-            log(f"budget stop: {stop['scope']} cap ${stop['cap_usd']:.2f} reached "
+            log(f"budget stop: {stop['scope']} cap ${stop['cap_usd']} reached "
                 f"(spent ${stop['spent_usd']:.6f}) at {stop['at']}")
     if spend_run or config.budget_usd is not None:
         log(f"spend      : ${spend_run:.6f} actual (summed usage.cost)"
-            + (f"  of run cap ${config.budget_usd:.2f}" if config.budget_usd is not None else ""))
+            + (f"  of run cap ${config.budget_usd}" if config.budget_usd is not None else ""))
 
     if preconditions_unmet:
         log(f"preconditions unmet: {len(preconditions_unmet)} (unscoreable, counted apart from harness failures)")

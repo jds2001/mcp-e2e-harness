@@ -67,7 +67,7 @@ class ProductPreturnDriver(FakeDriver):
 
 
 def experiment(root: Path, failures=(1,), retries=None, crash=False, scored_null=False,
-               budget=None, product=False, cell_budget=None):
+               budget=None, product=False, cell_budget=None, router_factory=PreturnRouter, product_driver=None):
     root.mkdir(parents=True, exist_ok=True)
     logs = []
     data = manifest_data() if product else loop_manifest()
@@ -77,7 +77,7 @@ def experiment(root: Path, failures=(1,), retries=None, crash=False, scored_null
     if cell_budget is not None:
         data["cells"][cell_name]["budget_usd"] = cell_budget
     old = {k: os.environ.get(k) for k in ("MCP_E2E_OPENROUTER_UPSTREAM", "OPENROUTER_API_KEY")}
-    fake = PreturnRouter(failures, crash, scored_null)
+    fake = router_factory(failures, crash, scored_null)
     os.environ["MCP_E2E_OPENROUTER_UPSTREAM"] = fake.start()
     os.environ["OPENROUTER_API_KEY"] = "sk-or-wo9-test-0123456789"
     try:
@@ -87,7 +87,7 @@ def experiment(root: Path, failures=(1,), retries=None, crash=False, scored_null
         if product:
             data["cells"][cell_name]["merge_gating"] = False
             config = RunConfig(load_manifest(write_manifest(root, data)), root / "run", [cell_name],
-                               drivers={"fake": ProductPreturnDriver(crash)}, **kwargs)
+                               drivers={"fake": product_driver or ProductPreturnDriver(crash)}, **kwargs)
         else:
             config = loop_config(root, data, **kwargs)
         result = run(config)

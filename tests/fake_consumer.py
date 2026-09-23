@@ -90,6 +90,12 @@ def main() -> int:
         print("I answered from memory without calling any tools.")
         return 0
 
+    if prompt.startswith("You're helping tidy the office's shared notes inbox"):
+        entry = config["mcpServers"]["shared_notes"]
+        with StdioMCPClient(entry["command"], entry.get("args") or [], env=spawn_env(entry)) as client:
+            for number in range(1, 5):
+                client.call_tool("file_note", {"note_id": f"n{number:02d}", "folder": "logistics"})
+
     name, entry = next((n, e) for n, e in config["mcpServers"].items() if n != "shared_notes")
     with StdioMCPClient(entry["command"], entry.get("args") or [],
                         env=spawn_env(entry)) as client:

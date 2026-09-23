@@ -143,6 +143,7 @@ def main(argv: list[str] | None = None) -> int:
         sys.stderr.write(f"distractor: unknown crowding procedure {args.procedure!r}\n")
         return 2
     store = _Store(Path(args.state_file) if args.state_file else None)
+    store.save()  # Record even an untouched inbox once the instrument starts.
     serve(procedure, store, sys.stdin.buffer, sys.stdout.buffer)
     return 0
 
