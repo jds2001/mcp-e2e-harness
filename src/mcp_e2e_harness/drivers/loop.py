@@ -589,7 +589,8 @@ class LoopDriver(Driver):
             "tool_calls": scored.get("tool_calls"),
             "step_cap": scored.get("step_cap"),
             "step_cap_hit": scored.get("step_cap_hit"),
-            "retries": scored.get("retries"),
+            "retries": (sum(r.get("retries") or 0 for r in results.values())
+                        if any("retries" in r for r in results.values()) else None),
             "offered_tools": scored.get("offered_tools"),
             "preturn": ({"steps": results["crowding"].get("steps"),
                          "tool_calls": results["crowding"].get("tool_calls"),
@@ -599,4 +600,6 @@ class LoopDriver(Driver):
             "probe": self._gates.get(cell_name or ""),
         }
         return {"record": record, "breaches": breaches, "cost_usd": digest["usage"]["cost_usd"],
-                "consumer_limit": scored.get("consumer_limit")}
+                "consumer_limit": scored.get("consumer_limit"),
+                "upstream_unavailable": next((r["upstream_unavailable"] for r in results.values()
+                                              if r.get("upstream_unavailable")), None)}

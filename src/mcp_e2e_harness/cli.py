@@ -212,7 +212,8 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--dry-run", action="store_true",
                        help="validate manifest, cells, and argv without calling any model or server")
     p_run.add_argument("--precondition-retries", type=nonnegative_integer, default=3,
-                       help="whole-invocation replacements after an unmet precondition (default: 3)")
+                       help="whole-invocation replacements after unmet preconditions or "
+                            "upstream unavailability (default: 3)")
     p_run.add_argument("--repeats", type=positive_integer, default=None,
                        help="repeat the selected grid N times (integer >= 1)")
     p_run.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_S,

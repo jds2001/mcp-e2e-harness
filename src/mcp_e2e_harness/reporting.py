@@ -155,7 +155,14 @@ def rebuild(run_dir: Path, *, overwrite: bool = False, manifest_path: Path | Non
             log=print) -> dict:
     """Reconstruct identities from metadata, never from directory segment names."""
     # Import here to keep the execution/reporting dependency one-way at import time.
-    from .runner import answers_across_prompts, answers_by_prompt, plan_invocations, zero_trace_cells
+    from .runner import (
+        answers_across_prompts,
+        answers_by_prompt,
+        plan_invocations,
+        replacement_cause,
+        unavailable_slot_failures,
+        zero_trace_cells,
+    )
 
     run_dir = run_dir.resolve()
     if (run_dir / 'run-manifest.json').exists() and not overwrite:
@@ -196,19 +203,33 @@ def rebuild(run_dir: Path, *, overwrite: bool = False, manifest_path: Path | Non
         attempts.sort(key=lambda pair: pair[1].get('attempt', 1))
         # A slot's file locator is its first retained attempt's actual path.
         slot_name = attempts[0][0]
-        scored = [(label, meta) for label, meta in attempts if meta.get('scored_turn_reached')]
+        reached = [(label, meta) for label, meta in attempts if meta.get('scored_turn_reached')]
+        scored = [(label, meta) for label, meta in reached if not meta.get('harness_failure')]
         last = attempts[-1][1]
         allowance = selection.get('precondition_retries')
         status = ('scored' if scored else 'failed')
         if not scored and last.get('precondition_unmet'):
             status = ('replacement_disabled' if allowance == 0 else 'exhausted'
                       if allowance is not None and last.get('attempt', 1) >= allowance + 1 else 'unmet')
-        slots[slot_name] = {'status': status, 'result': scored[-1][0] if scored else None,
-                            'attempts': len(attempts), 'cell': cell, 'prompt_id': prompt, 'repetition': repetition}
+        unavailable = replacement_cause(last) == 'upstream_unavailable'
+        if not scored and unavailable and allowance and last.get('attempt', 1) >= allowance + 1:
+            status = 'exhausted'
+        if not scored and (previous.get('slots', {}).get(slot_name) or {}).get('status') == 'budget_stopped':
+            status = 'budget_stopped'
+        slots[slot_name] = {'status': status, 'result': reached[-1][0] if reached else None,
+                            'attempts': len(attempts), 'cell': cell, 'prompt_id': prompt, 'repetition': repetition,
+                            'attempts_unmet': sum(bool(meta.get('precondition_unmet')) for _, meta in attempts),
+                            'attempts_unavailable': sum(replacement_cause(meta) == 'upstream_unavailable'
+                                                        for _, meta in attempts)}
+        if not scored and unavailable:
+            slots[slot_name]['cause'] = 'upstream_unavailable'
         counter = counts.setdefault(cell, {}).setdefault(prompt, {
-            'asked': None, 'observed_slots': 0, 'reached': 0, 'attempts': 0})
+            'asked': None, 'observed_slots': 0, 'reached': 0, 'attempts': 0,
+            'attempts_unmet': 0, 'attempts_unavailable': 0})
         counter['observed_slots'] += 1
-        counter['reached'] += len(scored)
+        counter['reached'] += len(reached)
+        counter['attempts_unmet'] += slots[slot_name]['attempts_unmet']
+        counter['attempts_unavailable'] += slots[slot_name]['attempts_unavailable']
         counter['attempts'] += len(attempts)
         for index, (label, meta) in enumerate(attempts):
             if meta.get('attempt', 1) > 1:
@@ -216,7 +237,7 @@ def rebuild(run_dir: Path, *, overwrite: bool = False, manifest_path: Path | Non
                 replacement_events.append({
                     'slot': slot_name, 'invocation': label, 'attempt': meta['attempt'],
                     'at': meta.get('started_utc'),
-                    'cause': (predecessor.get('precondition_unmet') or {}).get('cause')})
+                    'cause': replacement_cause(predecessor)})
             if meta.get('precondition_unmet'):
                 unmet[label] = {'slot': slot_name, 'attempt': meta.get('attempt', 1),
                                 'cause': meta['precondition_unmet']['cause']}
@@ -228,7 +249,8 @@ def rebuild(run_dir: Path, *, overwrite: bool = False, manifest_path: Path | Non
                                    set(selection['prompts']) if selection.get('prompts') else None)
         for item in planned:
             counter = counts.setdefault(item.cell_name, {}).setdefault(item.entry['id'], {
-                'observed_slots': 0, 'reached': 0, 'attempts': 0})
+                'observed_slots': 0, 'reached': 0, 'attempts': 0,
+                'attempts_unmet': 0, 'attempts_unavailable': 0})
             counter['asked'] = selection.get('repeats') or 1
     elif previous.get('invocation_counts'):
         for cell, prompts in counts.items():
@@ -286,8 +308,8 @@ def rebuild(run_dir: Path, *, overwrite: bool = False, manifest_path: Path | Non
         'cell_gates': previous.get('cell_gates') or recorded_gates or None,
         'pre_run': previous.get('pre_run'), 'replacement_events': replacement_events,
         'budget': budget, 'voided_cells': previous.get('voided_cells'), 'zero_trace_cell_failures': dead,
-        'failures': sum(bool(meta.get('harness_failure')) and not meta.get('precondition_unmet')
-                        for meta in results) + len(dead),
+        'failures': sum(bool(meta.get('harness_failure')) and not replacement_cause(meta)
+                        for meta in results) + len(dead) + unavailable_slot_failures(slots, results, dead),
     }
     for key in ('driver_probes', 'cell_gates', 'voided_cells'):
         if record[key] is not None:

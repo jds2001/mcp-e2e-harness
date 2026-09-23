@@ -24,7 +24,8 @@ from mcp_e2e_harness.runner import HarnessError, preflight
 def test_attempts(tmp_path, case, kwargs, counts, unmet):
     config, result = experiment(tmp_path, **kwargs)
     manifest = json.loads((config.run_dir / 'run-manifest.json').read_text())
-    assert manifest['invocation_counts']['loop-cell']['A1'] == dict(
+    assert {k: v for k, v in manifest['invocation_counts']['loop-cell']['A1'].items()
+            if k in ('asked', 'reached', 'attempts')} == dict(
         zip(('asked', 'reached', 'attempts'), counts, strict=True))
     assert len(manifest['preconditions_unmet']) == unmet
     assert len(result.results) == counts[2]

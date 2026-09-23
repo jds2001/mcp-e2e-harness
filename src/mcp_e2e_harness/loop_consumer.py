@@ -60,7 +60,7 @@ _CONTEXT_REQ_RE = re.compile(r"requested about (\d[\d,]*) tokens", re.I)
 # offered verbatim, which is an instrument limit reported loudly, never mangled.
 _FUNCTION_NAME_RE = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
 
-_RETRY_STATUSES = (429, 502, 503, 504)
+_RETRY_STATUSES = (429, *range(500, 600))
 _RETRY_BACKOFF_S = (2.0, 5.0)
 
 
@@ -76,6 +76,13 @@ class LoopBreach(RuntimeError):
 
 class LoopError(RuntimeError):
     """A harness/IO failure: not a consumer result."""
+
+
+class UpstreamUnavailable(LoopError):
+    def __init__(self, record: dict):
+        self.record = record
+        super().__init__(f"upstream_unavailable: provider={record['provider'] or 'unknown'} "
+                         f"HTTP {record['http_status'] or 'timeout'} after {record['attempts']} attempts")
 
 
 class LoopLimit(RuntimeError):
@@ -189,17 +196,39 @@ class ChatClient:
                 raw = exc.read()
                 status = exc.code
             except (urllib.error.URLError, OSError) as exc:
-                raise LoopError(f"request to {url} failed: {exc}") from None
-            if status in _RETRY_STATUSES and attempt < len(_RETRY_BACKOFF_S):
-                self.retries += 1
-                self.log(f"HTTP {status}; retrying in {_RETRY_BACKOFF_S[attempt]:.0f}s")
-                time.sleep(_RETRY_BACKOFF_S[attempt])
-                attempt += 1
-                continue
+                reason = getattr(exc, "reason", exc)
+                if not isinstance(reason, TimeoutError):
+                    raise LoopError(f"request to {url} failed: {exc}") from None
+                raw, status = b"", None
             try:
                 payload = json.loads(raw.decode("utf-8"))
             except (UnicodeDecodeError, ValueError):
                 payload = None
+            if status is None or status in _RETRY_STATUSES:
+                # Preserve S13's classification after the existing retry budget.
+                if status is not None and 400 <= status < 500 and attempt == len(_RETRY_BACKOFF_S):
+                    try:
+                        self._raise_for_error(status, payload, body)
+                    except LoopLimit:
+                        raise
+                    except LoopError:
+                        pass
+                if attempt < len(_RETRY_BACKOFF_S):
+                    self.retries += 1
+                    self.log(f"HTTP {status or 'timeout'}; retrying in {_RETRY_BACKOFF_S[attempt]:.0f}s")
+                    time.sleep(_RETRY_BACKOFF_S[attempt])
+                    attempt += 1
+                    continue
+                error = payload.get("error") if isinstance(payload, dict) else None
+                metadata = error.get("metadata") if isinstance(error, dict) else None
+                provider = (metadata.get("provider_name") if isinstance(metadata, dict) else None)
+                provider = provider or (payload.get("provider") if isinstance(payload, dict) else None)
+                raise UpstreamUnavailable({
+                    "http_status": status, "provider": provider,
+                    "attempts": attempt + 1, "retry_schedule_s": list(_RETRY_BACKOFF_S[:attempt]),
+                    "step": None, "tool_calls_before": self.turn_tool_calls,
+                    **({"transport_error": "timeout"} if status is None else {}),
+                })
             if status >= 400:
                 self._raise_for_error(status, payload, body)
             if not isinstance(payload, dict):
@@ -547,6 +576,11 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
             result["steps"] = step
             try:
                 response = client.complete(build_request(config, messages, tools))
+            except UpstreamUnavailable as exc:
+                exc.record["step"] = step
+                result["upstream_unavailable"] = exc.record
+                result["error"] = str(exc)
+                break
             except LoopLimit as limit:
                 result["consumer_limit"] = limit.record
                 log(f"CONSUMER LIMIT -- {limit.detail}")
@@ -587,7 +621,7 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
                 messages.append(tool_message)
                 transcript.append(tool_message)
                 save_transcript()
-        if answer is None and result["consumer_limit"] is None:
+        if answer is None and result["consumer_limit"] is None and not result.get("upstream_unavailable"):
             result["step_cap_hit"] = True
             result["consumer_limit"] = {
                 "cause": "step_cap", "step_cap": scaffold.step_cap, "tool_calls": result["tool_calls"],
@@ -716,6 +750,9 @@ def execute(config: TurnConfig, prompt: str, out=sys.stdout, log=_log) -> int:
         log(f"error: {exc}")
         return EXIT_ERROR
     result_path.write_text(json.dumps(result, indent=2) + "\n")
+    if result.get("upstream_unavailable"):
+        log(result["error"])
+        return EXIT_ERROR
     if result["consumer_limit"] is not None:
         log(f"consumer limit ({result['consumer_limit']['cause']}): no answer produced")
         return EXIT_LIMIT

@@ -488,6 +488,8 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     t0 = time.perf_counter()
     harness_failure: str | None = None
     consumer_limit: dict | None = None
+    upstream_unavailable = None
+    upstream_failure = None
     precondition_unmet = None
     precondition_failure = None
     scored_turn_reached = False
@@ -595,6 +597,14 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
             breaches = list(extra.get("breaches") or [])
             spend_usd = extra.get("cost_usd")
             consumer_limit = extra.get("consumer_limit") or consumer_limit
+            upstream_unavailable = extra.get("upstream_unavailable")
+            if upstream_unavailable and harness_failure and harness_failure.startswith(
+                    ("runner exited", "crowding pre-turn exited")):
+                status = upstream_unavailable["http_status"] or "timeout"
+                provider = upstream_unavailable["provider"] or "unknown"
+                harness_failure = upstream_failure = (
+                    f"upstream_unavailable: provider={provider} HTTP {status} after "
+                    f"{upstream_unavailable['attempts']} attempts")
             if breaches:
                 harness_failure = breaches[0]
             # S13/S16 consumer outcomes use a nonzero exit status deliberately.
@@ -613,7 +623,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         lowered = [s.casefold() for s in streams]
         web_activity = [m for m in driver.web_event_markers
                         if any(m in s for s in lowered)]
-        if web_activity and (harness_failure is None or precondition_unmet):
+        if web_activity and (harness_failure is None or precondition_unmet or upstream_failure):
             harness_failure = (f"web-tool activity suspected in the driver's event streams "
                                f"({','.join(web_activity)}) -- instrument breach; claims not "
                                "tool-attributable")
@@ -627,7 +637,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         api_surface["unparseable_requests"] = recorder.unrecorded_requests
         api_surface["unparseable_encodings"] = sorted(recorder.unrecorded_encodings)
         api_surface["upstream_forward_errors"] = recorder.forward_errors
-        if harness_failure is None or precondition_unmet:
+        if harness_failure is None or precondition_unmet or upstream_failure:
             if api_surface["disallowed_builtins_on_wire"]:
                 # The channel the argv claims closed is open at the wire: an instrument
                 # breach, not a consumer behavior; the row's claims are not
@@ -690,10 +700,14 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
     records, parse_errors = _read_trace(dest / "trace.jsonl")
     if (dest / "trace.jsonl").exists():
         assert_clean((dest / "trace.jsonl").read_text(errors="replace"), scan, str(dest / "trace.jsonl"))
-    if parse_errors and (not harness_failure or precondition_unmet):
+    if parse_errors and (not harness_failure or precondition_unmet or upstream_failure):
         harness_failure = (f"{parse_errors} unparseable trace line(s) -- instrument defect; "
                            "fix the instrument before any disposition")
 
+    if upstream_failure and api_surface and api_surface.get("upstream_forward_errors"):
+        harness_failure = "API recorder forwarding error; upstream availability is not attributable"
+    if upstream_failure and harness_failure != upstream_failure:
+        upstream_unavailable = None  # Instrument defects must never enable replacement.
     if precondition_unmet and harness_failure != precondition_failure:
         precondition_unmet = None  # An instrument defect takes precedence.
 
@@ -748,6 +762,7 @@ def run_one(config: RunConfig, planned: Planned, driver_versions: dict[str, str]
         "exit_status": exit_status,
         "harness_failure": harness_failure,
         "precondition_unmet": precondition_unmet,
+        "upstream_unavailable": upstream_unavailable,
         "attempt": attempt,
         "scored_turn_reached": scored_turn_reached,
         # S13/S16: answerless consumer outcomes, including limits and null final content.
@@ -1370,6 +1385,23 @@ def preflight(config: RunConfig) -> None:
                             where=f"cells.{cell_name}.env")
 
 
+def replacement_cause(meta: dict) -> str | None:
+    if meta.get("breaches") or meta.get("web_activity_suspected"):
+        return None
+    if meta.get("precondition_unmet"):
+        return meta["precondition_unmet"]["cause"]
+    if meta.get("upstream_unavailable") and str(meta.get("harness_failure")).startswith("upstream_unavailable:"):
+        return "upstream_unavailable"
+    return None
+
+
+def unavailable_slot_failures(slots: dict, results: list[dict], dead: list[str]) -> int:
+    """Count unfilled unavailable slots once; zero-trace cell failure already covers them."""
+    cells = {row["cell"] for row in results} - set(dead)
+    return sum(slot.get("cause") == "upstream_unavailable" and slot.get("status") in {"failed", "exhausted"}
+               and slot.get("cell") in cells for slot in slots.values())
+
+
 def run(config: RunConfig) -> RunResult:
     # Every path handed to a driver or proxy must survive a cwd change: the consumer
     # runs in a neutral temp directory, so a relative run dir would make the config
@@ -1412,10 +1444,10 @@ def run(config: RunConfig) -> RunResult:
     log(f"invocations: {len(planned) * repeat_count}   (one fresh process each -- never batched)"
         + ("   [DRY RUN]" if config.dry_run else ""))
     worst_attempts = repeat_count * sum(
-        1 + config.precondition_retries if item.cell["context"] == "crowded" else 1
+        1 + config.precondition_retries
         for item in planned)
     log(f"attempts   : expected {len(planned) * repeat_count}; worst-case {worst_attempts} "
-        f"with up to {config.precondition_retries} precondition replacement(s) per crowded slot")
+        f"with up to {config.precondition_retries} replacement(s) per slot")
     for driver_id in sorted(driver_ids):
         log(f"driver     : {driver_id}  [{driver_versions[driver_id] or 'not recorded: dry run'}]")
 
@@ -1435,8 +1467,8 @@ def run(config: RunConfig) -> RunResult:
                 if estimates and all(value is not None for value in estimates):
                     worst = round(sum(
                         info["estimate"]["usd_total"] *
-                        (1 + config.precondition_retries if manifest.cells[name]["context"] == "crowded" else 1)
-                        for name, info in record["cells"].items()), 6)
+                        (1 + config.precondition_retries)
+                        for info in record["cells"].values()), 6)
                 record["precondition_replacements"] = {
                     "retries": config.precondition_retries,
                     "expected_usd": expected, "worst_case_usd": worst}
@@ -1486,11 +1518,13 @@ def run(config: RunConfig) -> RunResult:
     slots: dict[str, dict] = {}
     for item in planned:
         invocation_counts.setdefault(item.cell_name, {})[item.entry["id"]] = {
-            "asked": repeat_count, "reached": 0, "attempts": 0}
+            "asked": repeat_count, "reached": 0, "attempts": 0,
+            "attempts_unmet": 0, "attempts_unavailable": 0}
         for repetition in range(1, repeat_count + 1):
             slot_path = row_relative_path(config, item.cell_name, item.entry["group"],
                                           item.entry["id"], repetition if config.repeats is not None else None)
-            slots[slot_path.as_posix()] = {"status": "not_started", "result": None, "attempts": 0}
+            slots[slot_path.as_posix()] = {"status": "not_started", "result": None, "attempts": 0,
+                                          "cell": item.cell_name, "attempts_unmet": 0, "attempts_unavailable": 0}
     budget_stops: list[dict] = []
     spend_run = 0.0
     spend_cell: dict[str, float] = {}
@@ -1613,18 +1647,29 @@ def run(config: RunConfig) -> RunResult:
                     reached = meta.get("scored_turn_reached", not meta["harness_failure"])
                     counts["reached"] += int(reached)
                     slot["attempts"] = attempt
-                    slot["status"] = "scored" if reached else "failed"
+                    slot["status"] = "scored" if reached and not meta["harness_failure"] else "failed"
                     if reached:
                         slot["result"] = path
                     if meta.get("spend_usd") is not None:
                         spend_run += float(meta["spend_usd"])
                         spend_cell[cell_name] = spend_cell.get(cell_name, 0.0) + float(meta["spend_usd"])
                     flag = ""
+                    eligible = replacement_cause(meta)
+                    slot.pop("cause", None)
+                    for counter, present in (("attempts_unmet", bool(meta.get("precondition_unmet"))),
+                                             ("attempts_unavailable", eligible == "upstream_unavailable")):
+                        counts[counter] += int(present)
+                        slot[counter] += int(present)
                     if meta.get("precondition_unmet"):
                         cause = meta["precondition_unmet"]["cause"]
                         preconditions_unmet[path] = {"slot": slot_name, "attempt": attempt, "cause": cause}
                         slot["status"] = "replacement_disabled" if config.precondition_retries == 0 else "exhausted"
                         flag = "  PRECONDITION UNMET"
+                    elif eligible == "upstream_unavailable":
+                        cause = "upstream_unavailable"
+                        slot["cause"] = cause
+                        slot["status"] = "exhausted" if config.precondition_retries else "failed"
+                        flag = "  UPSTREAM UNAVAILABLE"
                     elif meta["harness_failure"]:
                         failures += 1
                         flag = "  HARNESS FAILURE"
@@ -1668,13 +1713,13 @@ def run(config: RunConfig) -> RunResult:
                                 "model turns.")
                         break
 
-                    if not meta.get("precondition_unmet") or attempt > config.precondition_retries:
+                    if not eligible or attempt > config.precondition_retries:
                         break
                 if run_stopped or cell_name in capped_cells or cell_name in voided:
                     break
 
     dead = zero_trace_cells(results, config.dry_run)
-    failures += len(dead)
+    failures += len(dead) + unavailable_slot_failures(slots, results, dead)
     for cell_name in dead:
         reason = ("every invocation in this cell recorded zero trace records without sufficient "
                   "row-local liveness evidence. BROKEN, never an abstention or a clean run.")
@@ -1788,7 +1833,8 @@ def run(config: RunConfig) -> RunResult:
     for cell_name, prompts in invocation_counts.items():
         for prompt, counts in prompts.items():
             log(f"invocations {cell_name}/{prompt}: asked {counts['asked']}, "
-                f"reached {counts['reached']}, attempts {counts['attempts']}")
+                f"reached {counts['reached']}, attempts {counts['attempts']}, "
+                f"unmet {counts['attempts_unmet']}, unavailable {counts['attempts_unavailable']}")
     if consumer_limits:
         log(f"consumer limits: {len(consumer_limits)}  (answerless consumer outcomes, S13 -- scored as a "
             f"failure to answer, NOT harness failures): "

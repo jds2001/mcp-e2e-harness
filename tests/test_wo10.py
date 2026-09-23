@@ -23,7 +23,8 @@ def test_state_acceptance(tmp_path, case):
     config, result = experiment(tmp_path, **CASES[case])
     manifest = json.loads((config.run_dir / 'run-manifest.json').read_text())
     cell = config.cells[0]
-    counts = manifest['invocation_counts'][cell]['A1']
+    counts = {key: value for key, value in manifest['invocation_counts'][cell]['A1'].items()
+              if key in ('asked', 'reached', 'attempts')}
     assert manifest['cell_marks'][cell]['answers']['A1']['invocations'] == counts['reached']
     if case in {'two', 'five'}:
         row = result.results[0]

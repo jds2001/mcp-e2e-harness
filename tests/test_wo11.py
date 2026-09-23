@@ -121,7 +121,8 @@ def test_killed_run_with_snapshot_recovers_requested_counts(tmp_path):
     before = row_digests(config.run_dir)
     record = rebuild(config.run_dir)
     assert record['invocation_counts']['loop-cell']['A1'] == {
-        'asked': 2, 'observed_slots': 2, 'reached': 2, 'attempts': 3}
+        'asked': 2, 'observed_slots': 2, 'reached': 2, 'attempts': 3,
+        'attempts_unmet': 1, 'attempts_unavailable': 0}
     assert record['selection']['precondition_retries'] == 3
     assert row_digests(config.run_dir) == before
 
