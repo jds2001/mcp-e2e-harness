@@ -169,6 +169,8 @@ def rebuild(run_dir: Path, *, overwrite: bool = False, manifest_path: Path | Non
         raise ValueError('run-manifest.json already exists; use --overwrite to rebuild it')
     rows = {}
     for path in sorted(run_dir.rglob('meta.json')):
+        if 'interview' in path.relative_to(run_dir).parts:
+            continue
         meta = json.loads(path.read_text())
         if 'cell' in meta and 'prompt_id' in meta:
             rows[path.parent.relative_to(run_dir).as_posix()] = meta

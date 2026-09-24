@@ -12,12 +12,15 @@ instead of -- the raw artifacts.
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .checks import lint_check
 from .drivers import DRIVERS
+from .interview import interview
+from .loop_consumer import LoopError
 from .manifest import Manifest, ManifestError, load_manifest
 from .reporting import rebuild
 from .runner import (
@@ -93,6 +96,21 @@ def cmd_run(args: argparse.Namespace) -> int:
         print(f"FATAL: {exc}")
         return 2
     return 1 if result.failures else 0
+
+
+def cmd_interview(args: argparse.Namespace) -> int:
+    try:
+        questions = list(args.ask or [])
+        if args.ask_file:
+            extra = json.loads(Path(args.ask_file).read_text())
+            if not isinstance(extra, list) or any(not isinstance(q, str) for q in extra):
+                raise ValueError("--ask-file must contain a JSON array of strings")
+            questions.extend(extra)
+        dest = interview(Path(args.row), questions, args.budget_usd)
+        return 2 if json.loads((dest / "meta.json").read_text()).get("harness_failure") else 0
+    except (OSError, ValueError, KeyError, LoopError) as exc:
+        print(f"REFUSED: {exc}")
+        return 2
 
 
 def cmd_report(args: argparse.Namespace) -> int:
@@ -190,6 +208,13 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="mcp-e2e", description=__doc__,
                                      formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
+
+    p_interview = sub.add_parser("interview", help="ask unscored follow-up questions on a completed loop row")
+    p_interview.add_argument("--row", required=True)
+    p_interview.add_argument("--ask", action="append", help="verbatim question; repeat for sequential turns")
+    p_interview.add_argument("--ask-file", help="JSON array of strings, appended after --ask questions")
+    p_interview.add_argument("--budget-usd", type=float)
+    p_interview.set_defaults(func=cmd_interview)
 
     p_report = sub.add_parser("report", help="rebuild run-level reports from retained rows")
     p_report.add_argument("--run-dir", required=True)

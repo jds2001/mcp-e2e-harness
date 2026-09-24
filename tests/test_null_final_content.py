@@ -83,7 +83,7 @@ def test_nonanswer_content_is_not_serialized_and_is_not_step_cap(tmp_path, conte
     assert len(chat.requests) == 1 and result["retries"] == 0
     transcript = json.loads((tmp_path / "loop-session-single.json").read_text())
     assert transcript["messages"][-1]["content"] == content
-    assert set(transcript) == {"messages", "offered_tools", "scaffold"}
+    assert set(transcript) == {"messages", "offered_tools", "scaffold", "tool_definitions"}
 
 
 @pytest.mark.parametrize("content", ["actual answer", "null", "None", " "])
@@ -164,7 +164,7 @@ def test_null_final_acceptance_artifacts(tmp_path, crowded):
         transcripts = list(dest.glob("loop-session-*.json"))
         assert len(transcripts) == 1
         transcript = json.loads(transcripts[0].read_text())
-        assert set(transcript) == {"messages", "offered_tools", "scaffold"}
+        assert set(transcript) == {"messages", "offered_tools", "scaffold", "tool_definitions"}
         assert meta["scaffold"]["content_hash"] == SCAFFOLD_HASH
     # Reasoning appears only in the consumer transcript, never the wire or metadata.
     marker_paths = [p for p in config.run_dir.rglob("*") if p.is_file()

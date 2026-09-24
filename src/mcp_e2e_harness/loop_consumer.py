@@ -176,6 +176,9 @@ class ChatClient:
         self.turn_tool_calls = 0
         self.last_served: str | None = None
 
+    def before_request(self) -> None:
+        """Optional accounting hook, also called before retry requests."""
+
     def complete(self, body: dict) -> dict:
         """POST one chat completion; returns the parsed response. Retries only the
         statuses that mean 'try again' (each retry is a real request on the wire)."""
@@ -183,6 +186,7 @@ class ChatClient:
         data = json.dumps(body).encode("utf-8")
         attempt = 0
         while True:
+            self.before_request()
             request = urllib.request.Request(
                 url, data=data, method="POST",
                 headers={"Authorization": f"Bearer {self._key}",
@@ -525,7 +529,8 @@ def check_served_provider(config: TurnConfig, response: dict, seq: int) -> str |
 
 
 def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: ChatClient,
-             log=_log) -> tuple[str, dict]:
+             log=_log, *, servers: dict[str, StdioMCPClient] | None = None,
+             interview: bool = False) -> tuple[str, dict]:
     """Run one turn of the tool loop; returns (answer, result record)."""
     result: dict[str, Any] = {"mode": "turn", "scaffold": scaffold.full_name,
                               "scaffold_hash": scaffold.content_hash(), "steps": 0,
@@ -541,8 +546,8 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
         session = json.loads(Path(config.session_path).read_text())
         transcript = list(session["messages"])
         # Plain reasoning is recorded but was never part of @1's echo policy.
-        messages = [assistant_message(m) if m.get("role") == "assistant" else m
-                    for m in transcript]
+        messages = (list(transcript) if interview else
+                    [assistant_message(m) if m.get("role") == "assistant" else m for m in transcript])
     else:
         messages = [{"role": "system", "content": scaffold.system_prompt}]
         transcript = list(messages)
@@ -550,21 +555,24 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
     messages.append(user_message)
     transcript.append(user_message)
     by_wire: dict[str, OfferedTool] = {}
+    tools = (session or {}).get("tool_definitions", [])
     transcript_path = Path(config.session_path or Path(config.result_path).with_name("loop-session-single.json"))
 
     def save_transcript() -> None:
         transcript_path.write_text(json.dumps(
             {"messages": transcript, "offered_tools": sorted(by_wire),
-             "scaffold": scaffold.full_name}, indent=1) + "\n")
+             "scaffold": scaffold.full_name, "tool_definitions": tools}, indent=1) + "\n")
 
     # Save before I/O and incrementally thereafter, including failed/interrupted rows.
     save_transcript()
     clients: dict[str, StdioMCPClient] = {}
     try:
-        clients = open_servers(Path(config.mcp_config), log) if config.mcp_config else {}
+        clients = (servers if servers is not None else
+                   open_servers(Path(config.mcp_config), log) if config.mcp_config else {})
         offered = offer_tools(clients)
         by_wire = {t.wire_name: t for t in offered}
-        tools = [t.definition for t in offered]
+        tools = ((session or {}).get("tool_definitions") if interview else None) or [
+            t.definition for t in offered]
         result["offered_tools"] = sorted(by_wire)
         if session is not None and sorted(session.get("offered_tools") or []) != sorted(by_wire):
             raise LoopBreach("surface_drift",
@@ -591,6 +599,7 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
             key = served or "(absent)"
             result["served_providers"][key] = result["served_providers"].get(key, 0) + 1
             choices = response.get("choices") or []
+            result["finish_reason"] = choices[0].get("finish_reason") if choices else None
             message = (choices[0].get("message")
                        if isinstance(choices, list) and choices and isinstance(choices[0], dict) else None)
             if not isinstance(message, dict):
@@ -629,9 +638,17 @@ def run_turn(config: TurnConfig, scaffold: LoopScaffold, prompt: str, client: Ch
                 "detail": (f"the step cap ({scaffold.step_cap} requests) ended the turn without a final "
                            "answer: a consumer outcome, not a harness failure"),
             }
+    except (LoopError, LoopBreach) as exc:
+        if not interview:
+            raise
+        result["error"] = str(exc)
+        if isinstance(exc, LoopBreach):
+            result["breach"] = {"kind": exc.kind, "detail": exc.detail}
+        answer = None
     finally:
-        for c in clients.values():
-            c.close()
+        if servers is None:
+            for c in clients.values():
+                c.close()
         result["usage"] = usage.as_dict()
         result["retries"] = client.retries
         save_transcript()
